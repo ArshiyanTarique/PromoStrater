@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sku-mapping-pipeline"
+version = "0.1.0"
+description = "Corporate-grade SKU Mapping Pipeline using RapidFuzz and LightGBM."
+readme = "README.md"
+requires-python = ">=3.11"
+
+authors = [
+    { name = "Arshiyan Tarique" }
+]
+
+dependencies = [
+    "pandas",
+    "numpy",
+    "rapidfuzz",
+    "scikit-learn==1.6.1",
+    "lightgbm",
+    "openpyxl",
+    "joblib",
+    "pyarrow",
+    "PyYAML",
+    "tqdm"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
