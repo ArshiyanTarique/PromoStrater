@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -)",
+      "Bash(where python *)",
+      "Bash(where py *)",
+      "Bash(./.venv/Scripts/python.exe -)",
+      "Bash(ls \"/c/Users/user/.claude/projects/C--Users-user-OneDrive---Salesflo-Internship-Salesflo-PromoStrater/memory/\" 2>/dev/null)",
+      "Bash(ls \"/c/Users/user/.claude/projects/\" 2>&1 | head -30)",
+      "Bash(./.venv/Scripts/python.exe build_outputs.py)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile sku_mapping_pipeline_ml.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
