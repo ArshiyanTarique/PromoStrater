@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # PromoStrater
 
 PromoStrater is an end-to-end SKU mapping and promotional intelligence pipeline designed to automatically match promotional flyer products to a client's master product catalogue.
@@ -169,3 +170,4 @@ The pipeline produces CSV files including:
 
 Data Analytics Intern  
 Salesflo
+=======
