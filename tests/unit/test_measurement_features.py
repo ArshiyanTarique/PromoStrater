@@ -57,6 +57,8 @@ def test_master_case_excludes_carton_total() -> None:
 def test_bonus_and_piece_count_extraction() -> None:
     assert _extract_bonus_weight("Chicken Nuggets 750g + 250g") == 250.0
     assert _extract_piece_count("Chicken Nuggets 20 pcs") == 20.0
+    assert _extract_piece_count("Chicken Nuggets x 20") == 20.0
+    assert math.isnan(_extract_piece_count("Chicken Nuggets 2 x 500g"))
 
 
 def test_missing_measurements_are_unknown() -> None:

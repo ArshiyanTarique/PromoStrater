@@ -202,12 +202,12 @@ def _offer_total_weight(details: Iterable[DetailedMeasure]) -> float:
 
 
 def _extract_piece_count(text: object) -> float:
-    """Extract explicit piece counts using the production regex order."""
+    """Extract explicit piece counts without treating multipack weights as pieces."""
     normalized = str(text).lower()
     patterns = [
         r"(\d+)\s*(?:pcs?|pieces?)\b",
         r"\b(\d+)\s*['’]s\b",
-        r"\bx\s*(\d+)\s*(?:pcs?|pieces?)?\b",
+        rf"\bx\s*(\d+)(?!\d)(?!\s*(?:{ALL_UNITS})\b)\s*(?:pcs?|pieces?)?\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, normalized)
