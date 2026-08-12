@@ -54,8 +54,12 @@ dist/
 # ==========================================================
 # Machine Learning
 # ==========================================================
-models/
-checkpoints/
+# Leading slashes anchor these to the repository root on purpose. Without one,
+# "models/" and "data/" match a directory of that name at *any* depth, which
+# silently excluded the src/sku_mapping/data package - loaders, validators,
+# preprocessing, offer identity - from being tracked at all.
+/models/
+/checkpoints/
 *.joblib
 *.pkl
 *.h5
@@ -64,17 +68,17 @@ checkpoints/
 # ==========================================================
 # Outputs
 # ==========================================================
-reports/
-figures/
-outputs/
+/reports/
+/figures/
+/outputs/
 
 # ==========================================================
 # Large datasets
 # ==========================================================
-data/
-datasets/
-raw_data/
-processed_data/
+/data/
+/datasets/
+/raw_data/
+/processed_data/
 *.db
 *.db-shm
 *.db-wal
