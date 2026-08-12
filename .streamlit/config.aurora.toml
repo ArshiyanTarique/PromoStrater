@@ -1,0 +1,83 @@
+[server]
+maxUploadSize = 100
+
+# Kept in step with config.toml, which explains why: this file replaces it
+# wholesale when the theme is swapped, so dropping the setting here would
+# quietly reintroduce the Windows interpreter crash on session disconnect.
+fileWatcherType = "none"
+
+[client]
+showErrorDetails = "none"
+
+[browser]
+gatherUsageStats = false
+
+# "Aurora" — light theme built from the sunset-gradient reference:
+# deep violet leads, magenta bridges, amber closes.
+[theme]
+base = "light"
+
+primaryColor = "#7C3AED"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F4FE"
+textColor = "#2A2340"
+linkColor = "#7C3AED"
+borderColor = "#E9E2F8"
+codeTextColor = "#5B2CAE"
+codeBackgroundColor = "#F7F4FE"
+dataframeBorderColor = "#E9E2F8"
+dataframeHeaderBackgroundColor = "#F1EBFD"
+
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "full"
+linkUnderline = false
+
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+codeFontSize = "0.875rem"
+headingFontSizes = ["34px", "25px", "20px", "17px", "15px", "13px"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+
+# Sunset ramp first, then supporting hues.
+chartCategoricalColors = [
+    "#7C3AED",
+    "#F7941E",
+    "#D6409F",
+    "#4C2A85",
+    "#12B886",
+    "#5B8DEF",
+    "#FFB443",
+]
+chartSequentialColors = [
+    "#F6F2FE",
+    "#EADFFD",
+    "#DCC8FB",
+    "#CBAEF8",
+    "#B893F4",
+    "#A377EE",
+    "#8D5AE4",
+    "#7440D2",
+    "#5B2CAE",
+    "#3F1C7D",
+]
+
+violetColor = "#7C3AED"
+blueColor = "#5B8DEF"
+greenColor = "#0CA678"
+yellowColor = "#F0A202"
+orangeColor = "#E8590C"
+redColor = "#E03131"
+grayColor = "#6B6383"
+
+[theme.sidebar]
+backgroundColor = "#FBF9FF"
+secondaryBackgroundColor = "#F1EBFD"
+codeBackgroundColor = "#F1EBFD"
+textColor = "#2A2340"
+borderColor = "#E9E2F8"
+primaryColor = "#7C3AED"

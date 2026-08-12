@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "promostrater-dashboard",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "dashboard/Dashboard.py",
+        "--server.port",
+        "8503",
+        "--server.headless",
+        "true"
+      ],
+      "port": 8503
+    }
+  ]
+}

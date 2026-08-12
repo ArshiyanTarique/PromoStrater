@@ -1,0 +1,96 @@
+[server]
+maxUploadSize = 100
+
+# Python 3.13.6 on Windows can abort the whole interpreter with
+#   Fatal Python error: _PySemaphore_Wakeup: parking_lot: ReleaseSemaphore failed
+# when a browser session disconnects. The faulting thread sits in watchdog's
+# emitter teardown (``_remove_emitter`` -> ``Thread.join``) while a script run
+# is finishing on another thread, so the crash is a race in CPython's own
+# semaphore layer, not in this application. Disabling the watcher removes the
+# emitter threads that connect/disconnect churns, which is the only part of
+# that race this repository controls.
+#
+# Cost: source edits no longer hot-reload. Restart Streamlit to pick them up.
+# That is the right trade for running the dashboard; set this back to "auto"
+# when actively editing dashboard code.
+fileWatcherType = "none"
+
+[client]
+showErrorDetails = "none"
+
+[browser]
+gatherUsageStats = false
+
+# "Slate" — light interface, dark charcoal sidebar, one indigo accent.
+# Mirrors the SLATE palette in dashboard/palettes.py; keep the two in step.
+[theme]
+base = "light"
+
+primaryColor = "#4F46E5"
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#111827"
+linkColor = "#4F46E5"
+borderColor = "#E5E7EB"
+codeTextColor = "#4338CA"
+codeBackgroundColor = "#EEF0F4"
+dataframeBorderColor = "#E5E7EB"
+dataframeHeaderBackgroundColor = "#EEF0F4"
+
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "full"
+linkUnderline = false
+
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+codeFontSize = "0.875rem"
+headingFontSizes = ["34px", "25px", "20px", "17px", "15px", "13px"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+
+# Indigo leads, then supporting hues held at similar value so no single
+# series shouts over the others.
+chartCategoricalColors = [
+    "#4F46E5",
+    "#0891B2",
+    "#16A34A",
+    "#F59E0B",
+    "#DC2626",
+    "#818CF8",
+    "#6B7280",
+]
+chartSequentialColors = [
+    "#F5F5FF",
+    "#E7E7FB",
+    "#D6D6F8",
+    "#C0C0F4",
+    "#A8A8EF",
+    "#8E8CE8",
+    "#7570DE",
+    "#5F56D2",
+    "#4F46E5",
+    "#3730A3",
+]
+
+violetColor = "#4F46E5"
+blueColor = "#2563EB"
+greenColor = "#16A34A"
+yellowColor = "#F59E0B"
+orangeColor = "#EA580C"
+redColor = "#DC2626"
+grayColor = "#6B7280"
+
+# The dark charcoal section.
+[theme.sidebar]
+backgroundColor = "#111827"
+secondaryBackgroundColor = "#1F2937"
+codeBackgroundColor = "#1F2937"
+textColor = "#F9FAFB"
+borderColor = "#374151"
+# Lifted off the page primary so it holds contrast against charcoal.
+primaryColor = "#818CF8"
+linkColor = "#A5B4FC"
