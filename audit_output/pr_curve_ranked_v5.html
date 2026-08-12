@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR curve — ranked-v5 SKU matcher</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;   /* CV curve — blue slot 1 */
+    --series-2:       #eb6834;   /* tail curve — orange slot 2 */
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding: 24px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+  }
+
+  .card {
+    max-width: 860px;
+    margin: 0 auto;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px 16px;
+  }
+  h1 { font-size: 16px; font-weight: 600; }
+  .subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+
+  .legend {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    margin: 14px 0 4px; font-size: 13px; color: var(--text-secondary);
+  }
+  .legend .key {
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .legend .stroke { width: 18px; height: 0; border-top: 2px solid; border-radius: 1px; }
+  .legend strong { color: var(--text-primary); font-weight: 600; }
+
+  .plot-wrap { position: relative; }
+  svg { display: block; width: 100%; height: auto; }
+  text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .tick-label { font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .axis-title { font-size: 12px; fill: var(--text-secondary); }
+  .op-label { font-size: 11.5px; fill: var(--text-secondary); }
+  .op-label tspan.val { fill: var(--text-primary); font-weight: 600; }
+  .ref-label { font-size: 11px; fill: var(--text-muted); }
+
+  .tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.12); min-width: 210px; z-index: 3;
+  }
+  .tooltip .tt-title { color: var(--text-muted); font-size: 11.5px; margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+  .tooltip .row { display: flex; align-items: center; gap: 7px; margin-top: 3px; }
+  .tooltip .row .stroke { width: 14px; border-top: 2px solid; border-radius: 1px; flex: none; }
+  .tooltip .row .val { font-weight: 600; color: var(--text-primary); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .tooltip .row .name { color: var(--text-secondary); }
+
+  details { margin-top: 12px; border-top: 1px solid var(--gridline); padding-top: 10px; }
+  summary { font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
+  table { border-collapse: collapse; margin-top: 8px; font-size: 12.5px; width: 100%; }
+  th, td { text-align: left; padding: 5px 10px 5px 0; font-variant-numeric: tabular-nums; }
+  th { color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--gridline); }
+  td { color: var(--text-primary); border-bottom: 1px solid var(--gridline); }
+  td.series-cell { color: var(--text-secondary); }
+  .footnote { font-size: 11.5px; color: var(--text-muted); margin-top: 10px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <div class="card">
+    <h1>Precision–recall curve — ranked-v5 SKU matcher (41 features)</h1>
+    <div class="subtitle">Candidate-pair classification: does this catalogue SKU belong to this offer?</div>
+    <div class="legend" id="legend"></div>
+    <div class="plot-wrap" id="plotwrap">
+      <svg id="chart" viewBox="0 0 820 460" role="img" aria-label="Precision recall curves for the ranked-v5 model"></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+    <details>
+      <summary>Operating points &amp; data table</summary>
+      <table id="optable">
+        <thead><tr><th>Cutoff</th><th>Role</th><th>Set in</th><th>Curve</th><th>Precision</th><th>Recall</th><th>Flagged</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+    <div class="footnote" id="footnote"></div>
+  </div>
+</div>
+<script>
+const DATA = {"cv": {"label": "Out-of-fold 5-fold CV (family-grouped)", "ap": 0.9684, "n_pairs": 34623, "n_pos": 2082, "recall": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99904, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99856, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.99808, 0.9976, 0.9976, 0.9976, 0.9976, 0.99712, 0.99712, 0.99712, 0.99712, 0.99712, 0.99712, 0.99712, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99664, 0.99616, 0.99616, 0.99616, 0.99616, 0.99616, 0.99616, 0.99616, 0.99568, 0.99568, 0.99568, 0.99568, 0.99472, 0.99472, 0.99472, 0.99472, 0.99376, 0.99376, 0.99328, 0.99328, 0.99328, 0.99328, 0.9928, 0.99183, 0.99135, 0.99135, 0.99135, 0.99135, 0.99135, 0.99135, 0.99135, 0.99135, 0.99135, 0.99087, 0.99039, 0.98895, 0.98655, 0.98511, 0.98415, 0.98367, 0.98031, 0.97887, 0.97598, 0.97502, 0.97454, 0.97166, 0.96398, 0.94621, 0.93996, 0.92699, 0.89289, 0.87608, 0.84774, 0.83622, 0.81316, 0.78578, 0.77089, 0.75696, 0.74304, 0.71662, 0.69116, 0.65178, 0.59846, 0.55524, 0.51105, 0.48703, 0.44044, 0.38617, 0.34678, 0.31076, 0.27906, 0.24304, 0.18444, 0.15562, 0.08646, 0.0], "precision": [0.06013, 0.06042, 0.06061, 0.06085, 0.0611, 0.06137, 0.06169, 0.06188, 0.06213, 0.06236, 0.06264, 0.06285, 0.063, 0.06325, 0.06349, 0.06373, 0.06405, 0.06424, 0.06445, 0.06463, 0.06502, 0.06532, 0.06567, 0.06583, 0.06604, 0.06628, 0.06646, 0.06658, 0.06678, 0.06693, 0.06714, 0.06744, 0.0677, 0.06796, 0.06831, 0.06844, 0.06862, 0.06889, 0.06918, 0.06943, 0.06971, 0.06995, 0.07012, 0.07047, 0.07079, 0.07091, 0.07114, 0.07154, 0.07179, 0.072, 0.07228, 0.07259, 0.07278, 0.07301, 0.07318, 0.07343, 0.0737, 0.07403, 0.07428, 0.07449, 0.07477, 0.07499, 0.07523, 0.07564, 0.07595, 0.07629, 0.07652, 0.07674, 0.07706, 0.07749, 0.07784, 0.07813, 0.07847, 0.07868, 0.07888, 0.07905, 0.07939, 0.07966, 0.07987, 0.08012, 0.08051, 0.08079, 0.0811, 0.0814, 0.08167, 0.08197, 0.08225, 0.08253, 0.08295, 0.08326, 0.08344, 0.08364, 0.08393, 0.08421, 0.08447, 0.08487, 0.08527, 0.0856, 0.08602, 0.08649, 0.08678, 0.08708, 0.08737, 0.08773, 0.08791, 0.08819, 0.0884, 0.08886, 0.08926, 0.08957, 0.08981, 0.09022, 0.09061, 0.09105, 0.0913, 0.09171, 0.09204, 0.09225, 0.09259, 0.09305, 0.09323, 0.09349, 0.09375, 0.09419, 0.09451, 0.09504, 0.09542, 0.09572, 0.09605, 0.09644, 0.09687, 0.09719, 0.09785, 0.09823, 0.09879, 0.09923, 0.09964, 0.10025, 0.10059, 0.10121, 0.10159, 0.10194, 0.10221, 0.10265, 0.10316, 0.10379, 0.10415, 0.10475, 0.1052, 0.10569, 0.10626, 0.10652, 0.10687, 0.10735, 0.10766, 0.10815, 0.10917, 0.10975, 0.11007, 0.1106, 0.11128, 0.11186, 0.1124, 0.11285, 0.11329, 0.11387, 0.11463, 0.11518, 0.11567, 0.11618, 0.11672, 0.11709, 0.11757, 0.11836, 0.11922, 0.11986, 0.12051, 0.12136, 0.1218, 0.12209, 0.12246, 0.1233, 0.12372, 0.12412, 0.12511, 0.1255, 0.12611, 0.12657, 0.12705, 0.12777, 0.12849, 0.12917, 0.12971, 0.13025, 0.13075, 0.13141, 0.13202, 0.13244, 0.13315, 0.1337, 0.13441, 0.1349, 0.13539, 0.13625, 0.13692, 0.13783, 0.13876, 0.14003, 0.14062, 0.14128, 0.1419, 0.14287, 0.14374, 0.14461, 0.14566, 0.14627, 0.14758, 0.14836, 0.14944, 0.15036, 0.1513, 0.15204, 0.15312, 0.15419, 0.1557, 0.15661, 0.15714, 0.15862, 0.16012, 0.16158, 0.16242, 0.16329, 0.16398, 0.16465, 0.16528, 0.16617, 0.16684, 0.16845, 0.16943, 0.17068, 0.17154, 0.17261, 0.17331, 0.17555, 0.17707, 0.17766, 0.17874, 0.17981, 0.18112, 0.18199, 0.18302, 0.18412, 0.1856, 0.1872, 0.18904, 0.19067, 0.19231, 0.19336, 0.19441, 0.19558, 0.19718, 0.19845, 0.19987, 0.20165, 0.20338, 0.20501, 0.20602, 0.20804, 0.20917, 0.21181, 0.21384, 0.216, 0.21756, 0.21972, 0.22089, 0.22273, 0.22384, 0.22534, 0.22689, 0.22914, 0.231, 0.23352, 0.23555, 0.23738, 0.23948, 0.24222, 0.2441, 0.246, 0.24859, 0.25054, 0.25292, 0.25419, 0.25673, 0.25965, 0.26438, 0.26624, 0.26803, 0.27071, 0.27574, 0.27878, 0.28303, 0.28513, 0.28789, 0.29033, 0.29415, 0.29718, 0.29962, 0.30192, 0.30435, 0.30633, 0.30847, 0.31199, 0.31598, 0.31973, 0.32392, 0.32755, 0.33344, 0.33883, 0.34371, 0.3463, 0.34992, 0.35813, 0.36346, 0.3681, 0.37273, 0.37867, 0.38287, 0.38759, 0.394, 0.40077, 0.40691, 0.41622, 0.42558, 0.43026, 0.43514, 0.44069, 0.44471, 0.45367, 0.46373, 0.46845, 0.47378, 0.48116, 0.4904, 0.49843, 0.51011, 0.51674, 0.52462, 0.53222, 0.54531, 0.55814, 0.57032, 0.58371, 0.59757, 0.61119, 0.62244, 0.63547, 0.65193, 0.67046, 0.68963, 0.70538, 0.71568, 0.72963, 0.74212, 0.75936, 0.76643, 0.77697, 0.79035, 0.80556, 0.82179, 0.83699, 0.84898, 0.85615, 0.86402, 0.87212, 0.87896, 0.89676, 0.92263, 0.93351, 0.96964, 0.97381, 0.98105, 0.98809, 0.9904, 0.99005, 0.99241, 0.99268, 0.99283, 0.99313, 0.99254, 0.99412, 0.9935, 0.99259, 0.99449, 0.99386, 0.99828, 0.99803, 1.0, 1.0, 1.0, 1.0], "ops": [{"threshold": 0.95, "precision": 0.97, "recall": 0.8064, "n_flagged": 1731, "name": "auto-accept", "where": "config, registry & joblib"}, {"threshold": 0.7, "precision": 0.9226, "recall": 0.8477, "n_flagged": 1913, "name": "review", "where": "registered package"}, {"threshold": 0.08, "precision": 0.8643, "recall": 0.939, "n_flagged": 2262, "name": "review", "where": "raw joblib"}]}, "tail": {"label": "Held-out tail (n=29 offers, no gold injection)", "ap": 0.7897, "n_pairs": 580, "n_pos": 35, "recall": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.97143, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.94286, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.91429, 0.88571, 0.85714, 0.82857, 0.82857, 0.82857, 0.8, 0.77143, 0.77143, 0.74286, 0.71429, 0.68571, 0.68571, 0.65714, 0.6, 0.57143, 0.54286, 0.51429, 0.48571, 0.45714, 0.42857, 0.37143, 0.34286, 0.28571, 0.25714, 0.22857, 0.2, 0.2, 0.17143, 0.14286, 0.08571, 0.05714, 0.0], "precision": [0.06034, 0.06045, 0.06055, 0.06076, 0.06087, 0.06108, 0.06119, 0.0613, 0.06151, 0.06162, 0.06184, 0.06195, 0.06217, 0.06228, 0.06239, 0.06261, 0.06272, 0.06295, 0.06306, 0.06329, 0.06341, 0.06352, 0.06375, 0.06387, 0.0641, 0.06422, 0.06434, 0.06458, 0.0647, 0.06494, 0.06506, 0.0653, 0.06542, 0.06554, 0.06579, 0.06591, 0.06616, 0.06629, 0.06654, 0.06667, 0.06679, 0.06705, 0.06718, 0.06744, 0.06757, 0.0677, 0.06796, 0.06823, 0.06849, 0.06863, 0.0689, 0.06903, 0.06917, 0.06944, 0.06958, 0.06986, 0.07, 0.07042, 0.07056, 0.07071, 0.07099, 0.07114, 0.07143, 0.07157, 0.07172, 0.07202, 0.07216, 0.07246, 0.07261, 0.07292, 0.07307, 0.07322, 0.07353, 0.07368, 0.074, 0.07415, 0.07447, 0.07463, 0.07479, 0.07511, 0.07527, 0.07559, 0.07576, 0.07592, 0.07625, 0.07642, 0.07675, 0.07692, 0.07726, 0.07761, 0.07778, 0.07812, 0.0783, 0.07865, 0.07883, 0.07919, 0.07937, 0.07955, 0.07991, 0.08009, 0.08046, 0.08065, 0.08083, 0.08121, 0.0814, 0.08178, 0.08197, 0.08235, 0.08255, 0.08274, 0.08314, 0.08333, 0.08373, 0.08393, 0.08434, 0.08454, 0.08475, 0.08516, 0.08537, 0.08578, 0.086, 0.08621, 0.08685, 0.08706, 0.0875, 0.08772, 0.08816, 0.08838, 0.08861, 0.08906, 0.08929, 0.08974, 0.08997, 0.09044, 0.09067, 0.09091, 0.09138, 0.09162, 0.09211, 0.09235, 0.09259, 0.09309, 0.09333, 0.09383, 0.09409, 0.09459, 0.09485, 0.09511, 0.09563, 0.09589, 0.09642, 0.09669, 0.09722, 0.09749, 0.09777, 0.09831, 0.09859, 0.09915, 0.09943, 0.09972, 0.10029, 0.10057, 0.10116, 0.10145, 0.10204, 0.10234, 0.10264, 0.10324, 0.10355, 0.10417, 0.10448, 0.10511, 0.10542, 0.10574, 0.10638, 0.10671, 0.10769, 0.10802, 0.10836, 0.10903, 0.10938, 0.11006, 0.11041, 0.11111, 0.11146, 0.11182, 0.11254, 0.1129, 0.11401, 0.11438, 0.11513, 0.11551, 0.11589, 0.11667, 0.11706, 0.11785, 0.11824, 0.11864, 0.11945, 0.11986, 0.12069, 0.12111, 0.12195, 0.12238, 0.12324, 0.12411, 0.12456, 0.12545, 0.1259, 0.12681, 0.12727, 0.12774, 0.12868, 0.12915, 0.13011, 0.1306, 0.13109, 0.13208, 0.13258, 0.13359, 0.1341, 0.13514, 0.13566, 0.13619, 0.13725, 0.1378, 0.13889, 0.13944, 0.14056, 0.14113, 0.1417, 0.14286, 0.14344, 0.14463, 0.14523, 0.14583, 0.14706, 0.14768, 0.14894, 0.14957, 0.15152, 0.15217, 0.15284, 0.15419, 0.15487, 0.15625, 0.15695, 0.15837, 0.15909, 0.15982, 0.16129, 0.16204, 0.16355, 0.16432, 0.16509, 0.16667, 0.16746, 0.16908, 0.1699, 0.17157, 0.17241, 0.17327, 0.175, 0.17588, 0.17766, 0.17857, 0.18041, 0.18135, 0.18229, 0.18421, 0.18519, 0.18717, 0.18817, 0.18919, 0.19126, 0.19337, 0.19553, 0.19663, 0.19886, 0.2, 0.20115, 0.20349, 0.20468, 0.20118, 0.20238, 0.20482, 0.20606, 0.20732, 0.20988, 0.21118, 0.21384, 0.21519, 0.21656, 0.2129, 0.21429, 0.21711, 0.21854, 0.22148, 0.22297, 0.22449, 0.22759, 0.22917, 0.23404, 0.23571, 0.23913, 0.24088, 0.24265, 0.24627, 0.24812, 0.25191, 0.25581, 0.25781, 0.2619, 0.264, 0.26829, 0.27049, 0.275, 0.27731, 0.27966, 0.28448, 0.28696, 0.29204, 0.29464, 0.3, 0.30275, 0.30556, 0.31132, 0.31429, 0.32039, 0.32353, 0.32673, 0.33333, 0.33673, 0.34375, 0.34737, 0.35484, 0.3587, 0.36264, 0.37079, 0.375, 0.38372, 0.38824, 0.39759, 0.40244, 0.40741, 0.41772, 0.42308, 0.43421, 0.44, 0.44595, 0.45833, 0.46479, 0.47826, 0.48529, 0.48485, 0.49231, 0.5, 0.51613, 0.52459, 0.54237, 0.55172, 0.57143, 0.58182, 0.59259, 0.61538, 0.62745, 0.65306, 0.66667, 0.65957, 0.68182, 0.67442, 0.70732, 0.725, 0.73684, 0.72973, 0.75, 0.76471, 0.75758, 0.77419, 0.8, 0.82143, 0.80769, 0.8, 0.82609, 0.81818, 0.85, 0.84211, 0.83333, 0.8125, 0.8, 0.76923, 0.75, 0.8, 0.77778, 0.875, 1.0, 1.0, 1.0, 1.0, 1.0], "ops": [{"threshold": 0.95, "precision": 0.8077, "recall": 0.6, "n_flagged": 26, "name": "auto-accept", "where": "config, registry & joblib"}, {"threshold": 0.7, "precision": 0.7576, "recall": 0.7143, "n_flagged": 33, "name": "review", "where": "registered package"}, {"threshold": 0.08, "precision": 0.6905, "recall": 0.8286, "n_flagged": 42, "name": "review", "where": "raw joblib"}], "hit1": 0.7586}, "thresholds": [{"t": 0.95, "name": "auto-accept", "where": "config, registry & joblib"}, {"t": 0.7, "name": "review", "where": "registered package"}, {"t": 0.08, "name": "review", "where": "raw joblib"}], "joblib_thresholds": {"auto": 0.95, "review": 0.08}};
+
+(function () {
+  if (!DATA) { document.getElementById("footnote").textContent = "No data injected."; return; }
+
+  const css = name => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(name).trim();
+  const W = 820, H = 460, M = { top: 18, right: 24, bottom: 52, left: 64 };
+  const IW = W - M.left - M.right, IH = H - M.top - M.bottom;
+  const sx = v => M.left + v * IW;          // recall 0..1
+  const sy = v => M.top + (1 - v) * IH;     // precision 0..1
+  const fmt = v => v.toFixed(2);
+  const svg = document.getElementById("chart");
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, parent) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    (parent || svg).appendChild(node);
+    return node;
+  };
+
+  const series = [
+    { d: DATA.cv,   color: "var(--series-1)", short: "5-fold CV (out-of-fold)" },
+    { d: DATA.tail, color: "var(--series-2)", short: "Held-out tail" },
+  ];
+
+  // ---- grid + axes (hairline, recessive)
+  for (let v = 0; v <= 1.001; v += 0.25) {
+    el("line", { x1: sx(0), x2: sx(1), y1: sy(v), y2: sy(v), stroke: "var(--gridline)", "stroke-width": 1 });
+    el("line", { x1: sx(v), x2: sx(v), y1: sy(0), y2: sy(1), stroke: "var(--gridline)", "stroke-width": 1 });
+    const ty = el("text", { x: M.left - 8, y: sy(v) + 4, "text-anchor": "end", class: "tick-label" }); ty.textContent = fmt(v);
+    const tx = el("text", { x: sx(v), y: sy(0) + 18, "text-anchor": "middle", class: "tick-label" }); tx.textContent = fmt(v);
+  }
+  el("line", { x1: sx(0), x2: sx(1), y1: sy(0), y2: sy(0), stroke: "var(--baseline)", "stroke-width": 1 });
+  el("line", { x1: sx(0), x2: sx(0), y1: sy(0), y2: sy(1), stroke: "var(--baseline)", "stroke-width": 1 });
+  const xt = el("text", { x: sx(0.5), y: H - 10, "text-anchor": "middle", class: "axis-title" }); xt.textContent = "Recall";
+  const yt = el("text", { x: 18, y: sy(0.5), class: "axis-title", transform: `rotate(-90 18 ${sy(0.5)})`, "text-anchor": "middle" }); yt.textContent = "Precision";
+
+  // ---- chance line (prevalence of positives among scored pairs), per curve context: use CV prevalence
+  const prev = DATA.cv.n_pos / DATA.cv.n_pairs;
+  el("line", { x1: sx(0), x2: sx(1), y1: sy(prev), y2: sy(prev), stroke: "var(--text-muted)", "stroke-width": 1, opacity: 0.55 });
+  const rl = el("text", { x: sx(1) - 4, y: sy(prev) - 5, "text-anchor": "end", class: "ref-label" });
+  rl.textContent = "chance = prevalence (" + prev.toFixed(2) + ")";
+
+  // ---- curves
+  const pathFor = d => d.recall.map((r, i) => (i ? "L" : "M") + sx(r).toFixed(1) + " " + sy(d.precision[i]).toFixed(1)).join(" ");
+  for (const s of series) {
+    el("path", { d: pathFor(s.d), fill: "none", stroke: s.color, "stroke-width": 2,
+                 "stroke-linejoin": "round", "stroke-linecap": "round" });
+  }
+
+  // ---- operating points: every live threshold, marked on BOTH curves so the
+  // gap between the optimistic and the honest estimate is visible per cutoff.
+  // Labels stay short (the cutoff only); the table carries precision/recall.
+  for (const s of series) {
+    for (const p of (s.d.ops || [])) {
+      const cx = sx(p.recall), cy = sy(p.precision);
+      el("circle", { cx, cy, r: 7, fill: "var(--surface-1)" });          // surface ring
+      el("circle", { cx, cy, r: 5, fill: s.color });
+      const above = cy > M.top + 34;
+      const lbl = el("text", {
+        x: cx, y: above ? cy - 13 : cy + 22, "text-anchor": "middle",
+        class: "op-label",
+      });
+      lbl.textContent = p.threshold.toFixed(2);
+    }
+  }
+
+  // ---- legend (2 series -> always present), AP carried in text tokens
+  const legend = document.getElementById("legend");
+  for (const s of series) {
+    const key = document.createElement("span");
+    key.className = "key";
+    const stroke = document.createElement("span");
+    stroke.className = "stroke";
+    stroke.style.borderTopColor = css(s.color.slice(4, -1)) || "";
+    stroke.style.borderTopColor = s.color.replace("var(", "").replace(")", "");
+    stroke.style.borderTopColor = "";
+    stroke.style.cssText += "border-top-color:" + s.color + ";";
+    key.appendChild(stroke);
+    const label = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = "AP " + s.d.ap.toFixed(3);
+    label.appendChild(document.createTextNode(s.short + " — "));
+    label.appendChild(strong);
+    key.appendChild(label);
+    legend.appendChild(key);
+  }
+
+  // ---- crosshair + single tooltip listing every series at that recall
+  const crosshair = el("line", { x1: 0, x2: 0, y1: sy(1), y2: sy(0), stroke: "var(--baseline)", "stroke-width": 1, visibility: "hidden" });
+  const hoverDots = series.map(s => el("circle", { r: 4.5, fill: s.color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" }));
+  const tooltip = document.getElementById("tooltip");
+  const wrap = document.getElementById("plotwrap");
+
+  const nearest = (d, r) => {
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < d.recall.length; i++) {
+      const dist = Math.abs(d.recall[i] - r);
+      if (dist < bd) { bd = dist; best = i; }
+    }
+    return best;
+  };
+
+  function onMove(evt) {
+    const rect = svg.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) * (W / rect.width);
+    const r = Math.min(1, Math.max(0, (px - M.left) / IW));
+    crosshair.setAttribute("x1", sx(r)); crosshair.setAttribute("x2", sx(r));
+    crosshair.setAttribute("visibility", "visible");
+    tooltip.style.display = "block";
+    tooltip.replaceChildren();
+    const title = document.createElement("div");
+    title.className = "tt-title";
+    title.textContent = "Recall ≈ " + r.toFixed(2);
+    tooltip.appendChild(title);
+    series.forEach((s, k) => {
+      const i = nearest(s.d, r);
+      const rr = s.d.recall[i], pp = s.d.precision[i];
+      hoverDots[k].setAttribute("cx", sx(rr)); hoverDots[k].setAttribute("cy", sy(pp));
+      hoverDots[k].setAttribute("visibility", "visible");
+      const row = document.createElement("div"); row.className = "row";
+      const stroke = document.createElement("span"); stroke.className = "stroke";
+      stroke.style.cssText = "border-top-color:" + s.color + ";";
+      const name = document.createElement("span"); name.className = "name"; name.textContent = s.short;
+      const val = document.createElement("span"); val.className = "val"; val.textContent = "P " + pp.toFixed(3);
+      row.appendChild(stroke); row.appendChild(name); row.appendChild(val);
+      tooltip.appendChild(row);
+    });
+    const wr = wrap.getBoundingClientRect();
+    let lx = evt.clientX - wr.left + 14;
+    if (lx + 230 > wr.width) lx = evt.clientX - wr.left - 244;
+    tooltip.style.left = lx + "px";
+    tooltip.style.top = Math.max(0, evt.clientY - wr.top - 20) + "px";
+  }
+  function onLeave() {
+    crosshair.setAttribute("visibility", "hidden");
+    hoverDots.forEach(d => d.setAttribute("visibility", "hidden"));
+    tooltip.style.display = "none";
+  }
+  svg.addEventListener("pointermove", onMove);
+  svg.addEventListener("pointerleave", onLeave);
+
+  // ---- table view (accessibility: values reachable without hover)
+  const tbody = document.querySelector("#optable tbody");
+  // Grouped by cutoff so the optimistic and honest estimate sit side by side.
+  const byThreshold = new Map();
+  for (const s of series) {
+    for (const p of (s.d.ops || [])) {
+      if (!byThreshold.has(p.threshold)) byThreshold.set(p.threshold, []);
+      byThreshold.get(p.threshold).push({ p, s });
+    }
+  }
+  for (const t of [...byThreshold.keys()].sort((a, b) => b - a)) {
+    for (const { p, s } of byThreshold.get(t)) {
+      const tr = document.createElement("tr");
+      const cells = ["≥ " + p.threshold.toFixed(2), p.name || "", p.where || "",
+                     s.short, p.precision.toFixed(3), p.recall.toFixed(3),
+                     String(p.n_flagged)];
+      cells.forEach((c, i) => {
+        const td = document.createElement("td");
+        if (i >= 1 && i <= 3) td.className = "series-cell";
+        td.textContent = c;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+  }
+
+  const fn = document.getElementById("footnote");
+  fn.textContent =
+    "CV curve: pooled out-of-fold scores, family-grouped 5-fold CV over " +
+    DATA.cv.n_pairs.toLocaleString() + " offer–SKU pairs (" + DATA.cv.n_pos.toLocaleString() +
+    " positives), gold candidates injected — same protocol as the reported cv_pr_auc, " +
+    "so it measures the classifier with the right answer always available. " +
+    "Tail curve: matcher_ranked_v5.joblib scored on the 29-offer held-out tail — " +
+    DATA.tail.n_pairs.toLocaleString() + " pairs, " + DATA.tail.n_pos.toLocaleString() +
+    " positives, retrieval-only with no gold injection" +
+    (DATA.tail.hit1 != null ? " (Hit@1 " + DATA.tail.hit1.toFixed(3) + ")" : "") +
+    ", so a retrieval miss counts against it. The tail is the honest estimate; " +
+    "with only " + DATA.tail.n_pos + " positives it carries a wide error bar. " +
+    "Dots mark every cutoff currently live in the system, on both curves — " +
+    (DATA.thresholds || []).map(t => t.t.toFixed(2) + " " + t.name + ", set in " + t.where).join("; ") + ".";
+})();
+</script>
+</body>
+</html>

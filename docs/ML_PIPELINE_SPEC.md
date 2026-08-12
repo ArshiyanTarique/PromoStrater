@@ -1294,3 +1294,202 @@ At the end, provide:
 6. Any assumptions.
 7. Any detected bugs in the original feature logic.
 8. A migration plan for Phase 2.
+
+==================================================
+PHASE 6A DEPLOYMENT CONTRACT
+==================================================
+
+ML deployment is controlled by one explicit mode: `disabled`, `shadow`, or
+`assisted`. The repository default is `disabled`. Shadow mode remains
+observational and runs only after authoritative exports. Assisted mode applies
+the registered v3 package before final mapping and competitor discovery, while
+continuing the observational monitoring stream.
+
+The assisted auto-accept threshold is configuration-owned. The initial value
+is 0.85 and must be recorded as `threshold_source=user_configured` and
+`production_threshold_approved=false`; it does not modify immutable model or
+registry metadata. Values below the threshold route to manual review. Hard
+semantic, measurement, feature, catalogue, package, and prediction conflicts
+block automatic acceptance. Model and monitoring failures are nonfatal and
+retain the existing production decision as a safe fallback. Inference never
+fits or updates a model.
+
+==================================================
+PHASE 6B EMBEDDING SECOND OPINION
+==================================================
+
+Embedding scoring is an independent, disabled-by-default observer of the
+exact candidate rows retained by RapidFuzz and scored by LightGBM. It cannot
+generate, add, filter, or reorder candidates and is not an input to the Phase
+6A decision policy.
+
+Backends are configuration-selected and loaded lazily. The preferred backend
+is the free local `sentence-transformers/all-MiniLM-L6-v2` model, installed
+through the optional `embedding` dependency group. A deterministic local
+hashing backend supports offline tests and operational dry runs. No paid API
+is supported.
+
+Prepared text retains labelled brand, product/family, variant, offer
+description, weight/unit/pack text, master description, category, and Product
+Master specification. Persistent vectors are isolated by exact normalized
+text, model ID, and model version. Missing or failed embedding infrastructure
+must produce an explicit unavailable state and leave LightGBM plus existing
+safety policy unchanged.
+
+Phase 6B does not define agreement thresholds, combine model scores, approve
+automatic matching, or add an LLM reviewer.
+
+==================================================
+PHASE 6C CANDIDATE AGREEMENT AND ROUTING
+==================================================
+
+Phase 6C evaluates the independent LightGBM and embedding rankings over the
+same retained candidate set. It produces one explicit, offer-level agreement
+record without modifying candidate generation, fitting a model, calling an
+LLM, or changing the learning dataset.
+
+The default safe-agreement gate requires a valid calibrated LightGBM
+probability of at least 0.85, the same top master SKU from both scorers, an
+existing master SKU, and no configured hard conflict. A same-candidate result
+below the LightGBM threshold is weak agreement and routes to `LLM_REVIEW`.
+Different top candidates route to `LLM_REVIEW`. Hard conflicts route to
+`MANUAL_REVIEW`. Missing embedding or LightGBM output is recorded explicitly
+and uses `SAFE_FALLBACK`; scorer failure is never treated as agreement.
+
+Optional minimum embedding similarity and margin gates remain unset by
+default. They may be enabled only through configuration after evidence
+supports a threshold. Phase 6C routing remains diagnostic and does not replace
+the authoritative production decision.
+
+==================================================
+PHASE 6D STRUCTURED LLM REVIEW
+==================================================
+
+Phase 6D reviews only offers whose Phase 6C route is `LLM_REVIEW`. It receives
+one bounded structured offer plus at most the configured number of retained
+candidates. It may accept one supplied candidate, reject all, or return
+uncertain. The explicit parser rejects arbitrary SKU IDs and malformed or
+out-of-schema output.
+
+The provider boundary supports a lazy local Ollama-compatible implementation
+without a paid dependency. LLM review is disabled by default. Timeout,
+provider, parsing, and cache failures are nonfatal and route to manual review.
+Deterministic protein, family, known measurement, pack, mixed-protein,
+feature, and catalogue conflicts always block LLM acceptance.
+
+Response caching is isolated by canonical structured request, exact model ID,
+prompt version, and response-schema version. Artifacts contain hashes and
+parsed provenance but no endpoint credentials or raw response text.
+
+`LLM_ACCEPT` is diagnostic eligibility only in Phase 6D. No production
+decision, Product Master row, model package, model weight, training dataset,
+human label, or competitor-discovery input is modified.
+
+==================================================
+PHASE 6E UNIFIED ASSISTED INFERENCE
+==================================================
+
+Phase 6E composes the existing RapidFuzz candidate generator, shared feature
+builder, registered calibrated LightGBM scorer, embedding scorer, agreement
+policy, and structured LLM reviewer into one explicit inference orchestrator.
+It reuses the shadow scorer chain so every scorer sees the same retained
+candidate rows and the existing monitoring/review artifacts continue.
+
+Final decisions are `AUTO_ACCEPT`, `LLM_ACCEPT`, `MANUAL_REVIEW`, `NO_MATCH`,
+`NO_CANDIDATE`, `MASTER_SKU_NOT_FOUND`, and `MODEL_ERROR`. Only
+`AUTO_ACCEPT` and valid `LLM_ACCEPT` are eligible mappings. Hard deterministic
+conflicts, missing embeddings, disabled/failed/uncertain/invalid LLM review,
+and unsupported routes are not eligible.
+
+Disabled mode does not call the orchestrator or add output columns. Shadow
+mode may calculate the same diagnostic decisions but cannot apply them to
+production-owned rows. Assisted mode appends provenance and applies only the
+explicit final policy before competitor discovery. Competitor discovery
+filters on both final eligibility and the allowed final-decision set.
+
+The legacy master-SKU aggregate exports retain their required columns and
+ordering. Assisted mode additionally writes the offer-level
+`FINAL_sku_mapping_decisions.csv` with original fields followed by unified
+decision and provenance fields.
+
+Phase 6E is assisted inference plus review-data collection. It never fits,
+updates, registers, or retrains a model and is not self-learning.
+
+==================================================
+PHASE 7A PERSISTENT LEARNING AND REVIEW STORAGE
+==================================================
+
+Phase 7A records unified inference runs, every retained candidate prediction,
+model/embedding/LLM provenance, deterministic five-question human-review
+sessions, automated label trust, model-version observations, and prospective
+training-dataset manifests in a versioned repository-owned SQLite store.
+
+Exactly five unique offers are selected after each successful run when at
+least five eligible offers exist: high-confidence automatic acceptance, near
+the configured threshold, LightGBM/embedding disagreement, LLM-reviewed, and
+difficult/conflict-prone. Empty categories use deterministic fallbacks whose
+reasons are persisted.
+
+Human review is True/False. False requires a supplied corrected candidate,
+none of the supplied candidates, or an explicit cannot-determine response.
+Decisive human answers are GOLD. LLM-qualified proposals are SILVER,
+model-only labels are PSEUDO and never automatically training-eligible, and
+inconclusive/conflicting labels are REJECTED.
+
+Prospective training-dataset records accept GOLD review IDs only and persist
+sealed challenge-exclusion proof. Creating these metadata records does not
+materialize a training table, fit a model, or modify the registry. Learning
+store failures remain nonfatal to Phase 6 production inference.
+
+==================================================
+PHASE 7B STREAMLIT REVIEW DASHBOARD
+==================================================
+
+Phase 7B exposes upload, processing, five-question review, and validated
+download workflows through a local Streamlit presentation layer. Streamlit
+pages contain presentation state only and call reusable dashboard services.
+Candidate generation, shared features, model scoring, agreement, LLM policy,
+competitor discovery, export validation, registry validation, and SQLite
+governance remain outside page files.
+
+Uploads are limited by configurable byte size, restricted to CSV/Excel,
+signature/schema checked, filename-sanitized, SHA-256 identified, and staged
+under generated run directories. Active or completed runs with identical
+source bytes are blocked unless the user explicitly confirms reprocessing.
+Only registry-listed packages that pass the existing strict package validator
+may be selected.
+
+The operational threshold remains 0.85 with
+`threshold_source=user_configured` and
+`production_threshold_approved=false`. Shadow processing stays observational;
+only assisted final decisions explicitly marked eligible may reach competitor
+discovery.
+
+SQLite is the durable source for run selection, progress, five questions, and
+answers. Browser refresh does not lose completed processing or reviews. False
+answers require a supplied correction, none-of-candidates, or
+cannot-determine state. No upload or review action invokes training,
+calibration, package registration, or model activation.
+
+Downloads use run-safe filenames and are offered only when stored paths are
+inside approved roots and CSV/JSON schemas validate. The dashboard never
+renders server paths, stack traces, or secret configuration.
+## Phase 7C controlled retraining and promotion
+
+Phase 7C is an offline, operator-triggered workflow. Upload inference and
+human-review submission never retrain a model.
+
+The workflow materializes immutable baseline-plus-review snapshots, reserves
+recent GOLD labels for same-row champion/challenger evaluation, creates
+connected-component-safe train/validation/calibration splits, fits weighted
+LightGBM challengers, and preserves separate calibration.
+
+PSEUDO labels are excluded. SILVER labels are disabled by default and receive
+a lower configurable sample weight when explicitly enabled. Sealed challenge
+artifacts remain inaccessible to ordinary training and evaluation.
+
+Challengers are not registered until every conservative comparison check
+passes. Passing registration grants assisted-use eligibility only.
+Registration never activates a model. Activation is an explicit registry
+compare-and-swap with actor, reason, expected champion, history, and rollback.
+Automatic production matching remains disabled.

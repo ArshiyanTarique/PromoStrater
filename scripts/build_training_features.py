@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from sku_mapping.paths import PROJECT_ROOT
 from sku_mapping.training import build_training_features_from_paths
 
 
@@ -15,17 +16,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gold",
         type=Path,
-        default=Path("GOLD_TRAINING_PAIRS_v5_FINAL.csv"),
+        default=PROJECT_ROOT / "GOLD_TRAINING_PAIRS_v5_FINAL.csv",
     )
     parser.add_argument(
         "--master",
         type=Path,
-        default=Path("Product_Master.xlsx"),
+        default=PROJECT_ROOT / "Product_Master.xlsx",
     )
     parser.add_argument(
         "--clickflyer",
         type=Path,
-        default=Path("Alkabeer_Export_Data_Clickflyer.csv"),
+        default=PROJECT_ROOT / "Alkabeer_Export_Data_Clickflyer.csv",
         help="Optional exact-match enrichment source.",
     )
     parser.add_argument(
@@ -36,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/processed"),
+        default=PROJECT_ROOT / "data" / "processed",
     )
     parser.add_argument("--output-encoding", default="utf-8-sig")
     return parser.parse_args()

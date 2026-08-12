@@ -10,6 +10,10 @@ __pycache__/
 venv/
 env/
 
+# Local dependency/model download caches (audit tooling)
+.pip_tmp_cache/
+.hf_cache/
+
 # ==========================================================
 # Environment variables
 # ==========================================================
@@ -62,6 +66,7 @@ checkpoints/
 # ==========================================================
 reports/
 figures/
+outputs/
 
 # ==========================================================
 # Large datasets
@@ -70,6 +75,11 @@ data/
 datasets/
 raw_data/
 processed_data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 
 # ==========================================================
 # Cache
@@ -86,6 +96,9 @@ processed_data/
 
 # Temporary
 .codex_tmp/
+
+# Streamlit local secrets
+.streamlit/secrets.toml
 
 # Node
 node_modules/
