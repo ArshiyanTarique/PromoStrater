@@ -58,12 +58,17 @@ dist/
 # "models/" and "data/" match a directory of that name at *any* depth, which
 # silently excluded the src/sku_mapping/data package - loaders, validators,
 # preprocessing, offer identity - from being tracked at all.
-/models/
 /checkpoints/
 *.joblib
 *.pkl
 *.h5
 *.onnx
+
+# Exception: the registered model package is tracked. config/default.yaml pins
+# ml.model_id and sets require_registered_model, so a clone without these files
+# cannot score at all - the dashboard fails closed and nine tests error on the
+# missing registry. 5.5 MB is worth a clone that runs.
+!/models/**
 
 # ==========================================================
 # Outputs

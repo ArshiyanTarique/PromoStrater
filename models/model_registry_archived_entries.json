@@ -1,0 +1,46 @@
+{
+  "archived_models": [
+    {
+      "approval_status": "NOT_APPROVED_FOR_AUTOMATIC_MATCHING",
+      "automatic_production_matching_approved": false,
+      "creation_timestamp": "2026-07-29T05:38:19.247759+00:00",
+      "deployment_status": "SHADOW_MODE_ONLY",
+      "feature_generator_version": "1.0.0",
+      "model_id": "legacy-v2-07d7ee9efa599c63c268",
+      "model_version": "alkabeer_sku_matcher_v2",
+      "notes": "Frozen v2 package; adversarial review prohibits automatic production matching. Existing package bytes remain unchanged.",
+      "package_filename": "alkabeer_sku_matcher_v2_20260729T053819247759Z.joblib",
+      "package_version": "legacy-v2+20260729T0538192477590000-07d7ee9e",
+      "parent_model": null,
+      "training_dataset_hash": "ca057baee56ae054c825f61662e3566e00da310beb4def4a8b5c9bff87eaf3d4"
+    },
+    {
+      "approval_status": "NOT_APPROVED_FOR_AUTOMATIC_MATCHING",
+      "automatic_production_matching_approved": false,
+      "creation_timestamp": "2026-07-29T05:40:28.473791+00:00",
+      "deployment_status": "SHADOW_MODE_ONLY",
+      "feature_generator_version": "1.0.0",
+      "model_id": "legacy-v2-e9035604a4ac617db3e8",
+      "model_version": "alkabeer_sku_matcher_v2",
+      "notes": "Frozen v2 package; adversarial review prohibits automatic production matching. Existing package bytes remain unchanged.",
+      "package_filename": "alkabeer_sku_matcher_v2_20260729T054028473791Z.joblib",
+      "package_version": "legacy-v2+20260729T0540284737910000-e9035604",
+      "parent_model": null,
+      "training_dataset_hash": "ca057baee56ae054c825f61662e3566e00da310beb4def4a8b5c9bff87eaf3d4"
+    },
+    {
+      "approval_status": "NOT_APPROVED_FOR_AUTOMATIC_MATCHING",
+      "automatic_production_matching_approved": false,
+      "creation_timestamp": "2026-07-29T06:18:02.974421+00:00",
+      "deployment_status": "SHADOW_MODE_ONLY",
+      "feature_generator_version": "1.0.0",
+      "model_id": "alkabeer-sku-matcher-v3-20260729T061802974421Z-8c636b0ac4a2",
+      "model_version": "alkabeer_sku_matcher_v3",
+      "notes": "Experimental leakage-safe calibrated v3 package. No sealed human-reviewed final challenge set; shadow mode only.",
+      "package_filename": "alkabeer_sku_matcher_v3_20260729T061802974421Z.joblib",
+      "package_version": "3.0.0+20260729t061802974421z",
+      "parent_model": "alkabeer_sku_matcher_v2_20260729T054028473791Z.joblib",
+      "training_dataset_hash": "9e16639398e1b29a7e12810dd810e79e478fc0d4ec13b54cf3592b839f316de9"
+    }
+  ]
+}
