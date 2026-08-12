@@ -27,6 +27,7 @@ from sku_mapping.data.validators import (
 )
 from sku_mapping.features import build_feature_vector, build_feature_vector_from_text
 from sku_mapping.features.text_features import safe_text
+from sku_mapping.paths import PROJECT_ROOT
 from sku_mapping.training.data_audit import (
     audit_training_data,
     normalized_offer_text,
@@ -344,7 +345,7 @@ def build_training_features_from_paths(
     master_path: str | Path,
     *,
     clickflyer_path: str | Path | None = None,
-    output_dir: str | Path = Path("data/processed"),
+    output_dir: str | Path = PROJECT_ROOT / "data" / "processed",
     output_encoding: str = "utf-8-sig",
 ) -> TrainingFeatureBuildResult:
     """Load validated inputs, build feature rows, and persist Phase 4 outputs."""

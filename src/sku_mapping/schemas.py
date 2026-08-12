@@ -25,10 +25,10 @@ CLICKFLYER_SCHEMA = TableSchema(
         "Country",
         "Retailer Name",
         "Flyer Name",
-        "offerid",
         "Offer Price",
         "Regular Price",
     ),
+    optional_columns=("offerid",),
 )
 
 PRODUCT_MASTER_SCHEMA = TableSchema(

@@ -54,6 +54,15 @@ def extract_measures_detailed(
     if not isinstance(text, str):
         return []
     normalized = text.lower().replace(",", "")
+    normalized = re.sub(
+        (
+            rf"(\d+(?:\.\d+)?)\s*({ALL_UNITS})\s*(?:x|\*|\u00d7)\s*"
+            rf"(\d+(?:\.\d+)?)\s*(?:pkts?|packets?|packs?)\s*"
+            rf"(?:x|\*|\u00d7)\s*(\d+(?:\.\d+)?)"
+        ),
+        r"\1 \2 x \3 x \4",
+        normalized,
+    )
     output: list[DetailedMeasure] = []
     occupied: list[tuple[int, int]] = []
 
@@ -233,6 +242,16 @@ def _extract_bonus_weight(text: object) -> float:
 def _master_units_per_carton(spec: object) -> float:
     """Extract the explicit carton multiplier from a master specification."""
     normalized = str(spec).lower().replace(",", "")
+    chained = re.search(
+        (
+            rf"\d+(?:\.\d+)?\s*(?:{ALL_UNITS})\s*(?:x|\*|\u00d7)\s*"
+            rf"\d+(?:\.\d+)?\s*(?:pkts?|packets?|packs?)\s*"
+            rf"(?:x|\*|\u00d7)\s*(\d+(?:\.\d+)?)"
+        ),
+        normalized,
+    )
+    if chained:
+        return float(chained.group(1))
     patterns = [
         rf"\d+(?:\.\d+)?\s*(?:{ALL_UNITS})\s*[x×*]\s*(\d+(?:\.\d+)?)",
         rf"(\d+(?:\.\d+)?)\s*[x×*]\s*\d+(?:\.\d+)?\s*(?:{ALL_UNITS})",

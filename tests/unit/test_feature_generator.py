@@ -96,6 +96,7 @@ def _load_legacy_feature_namespace() -> dict[str, Any]:
         "PROTEIN_WORDS",
         "NON_MEAT_WORDS",
         "FAMILY_PHRASES",
+        "FAMILY_CONCEPT_ALIASES",
         "VARIANT_WORDS",
     }
     functions = {
@@ -115,6 +116,8 @@ def _load_legacy_feature_namespace() -> dict[str, Any]:
         "_master_units_per_carton",
         "_protein_set",
         "_family_set",
+        "_family_concept_set",
+        "_resolve_semantic_variant",
         "_variant_set",
         "_compatibility_flag",
         "_expected_match_count",
@@ -225,6 +228,50 @@ def test_mixed_protein_offer() -> None:
     )
     assert features["is_mixed_protein_offer"] == 1
     assert features["expected_match_count"] == 2.0
+
+
+def test_contradictory_source_variant_cannot_override_offer_protein() -> None:
+    offer = _offer(
+        "Al Kabeer Chicken Samosas 240 gm",
+        product="Samosa-Frozen",
+        variant="Mutton",
+        pack="240 gm",
+    )
+    chicken = _master(
+        "12 CHICKEN SAMOSAS",
+        "SAMOSA",
+        "Chicken samosas",
+        "240 Gms x 20 Pkts",
+    )
+    mutton = _master(
+        "12 MUTTON SAMOSAS",
+        "SAMOSA",
+        "Mutton samosas",
+        "240 Gms x 20 Pkts",
+    )
+
+    chicken_features = build_feature_vector(offer, chicken)
+    mutton_features = build_feature_vector(offer, mutton)
+
+    assert chicken_features["protein_match"] == 1
+    assert mutton_features["protein_match"] == 0
+    assert chicken_features["is_mixed_protein_offer"] == 0
+
+
+def test_nested_family_aliases_are_one_product_family() -> None:
+    features = build_feature_vector_from_text(
+        "Al Kabeer Chicken Nuggets 400 gm",
+        _master(
+            "CHICKEN NUGGETS (400G)",
+            "NUGGETS",
+            "Chicken nuggets",
+            "400 Gms x 12 Pkts",
+        ),
+        product="Chicken Nuggets-Frozen",
+        base_packsize="400 gm",
+    )
+    assert features["family_match"] == 1
+    assert features["is_multi_family_offer"] == 0
 
 
 def test_all_feature_values_are_numeric_or_nan() -> None:

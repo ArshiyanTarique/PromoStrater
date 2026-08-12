@@ -28,8 +28,10 @@ from sku_mapping.features.semantic_features import (
     NON_MEAT_WORDS,
     _compatibility_flag,
     _expected_match_count,
+    _family_concept_set,
     _family_set,
     _protein_set,
+    _resolve_semantic_variant,
     _variant_set,
 )
 from sku_mapping.features.text_features import clean_offer_text, safe_text
@@ -89,11 +91,18 @@ def build_feature_vector(
     parity. When absent, the same source-specific parsers derive them from the
     raw offer and master fields.
     """
+    offer_name = safe_text(_row_value(offer_row, "Offer Name"))
+    offer_product = safe_text(_row_value(offer_row, "Product"))
+    semantic_variant = _resolve_semantic_variant(
+        offer_name,
+        offer_product,
+        safe_text(_row_value(offer_row, "Variant")),
+    )
     offer_text = " ".join(
         [
-            safe_text(_row_value(offer_row, "Offer Name")),
-            safe_text(_row_value(offer_row, "Product")),
-            safe_text(_row_value(offer_row, "Variant")),
+            offer_name,
+            offer_product,
+            semantic_variant,
         ]
     ).strip()
     master_text = " ".join(
@@ -145,7 +154,9 @@ def build_feature_vector(
             _row_value(master_row, "Item-Spec")
         ),
         "is_mixed_protein_offer": int(len(offer_proteins) > 1),
-        "is_multi_family_offer": int(len(offer_families) > 1),
+        "is_multi_family_offer": int(
+            len(_family_concept_set(offer_text)) > 1
+        ),
         "contains_non_meat_product": int(
             bool(set(re.findall(r"[a-z]+", offer_text.lower())) & NON_MEAT_WORDS)
         ),

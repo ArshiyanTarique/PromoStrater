@@ -1,34 +1,79 @@
 import pandas as pd
 import numpy as np
 import re
+import sys
 import time
 import json
 import requests
 import joblib
+import logging
 from pathlib import Path
 from rapidfuzz import fuzz, process
 
-FLYER_PATH = "Alkabeer_Export_Data_Clickflyer.csv"
-MASTER_PATH = "Product_Master.xlsx"
+# Make src/ importable for the rank_features module
+_PROJECT_ROOT_FOR_SRC = Path(__file__).resolve().parent
+if str(_PROJECT_ROOT_FOR_SRC / "src") not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_FOR_SRC / "src"))
 
-FINAL_CLICKFLYER_CSV = "outputs/FINAL_master_sku_clickflyer_offers.csv"
-FINAL_COMPETITOR_CSV = "outputs/FINAL_alkabeer_competitor_offers.csv"
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+FLYER_PATH = PROJECT_ROOT / "Alkabeer_Export_Data_Clickflyer.csv"
+MASTER_PATH = PROJECT_ROOT / "Product_Master.xlsx"
+
+FINAL_CLICKFLYER_CSV = (
+    PROJECT_ROOT / "outputs" / "FINAL_master_sku_clickflyer_offers.csv"
+)
+FINAL_COMPETITOR_CSV = (
+    PROJECT_ROOT / "outputs" / "FINAL_alkabeer_competitor_offers.csv"
+)
+FINAL_SKU_MAPPING_DECISIONS_CSV = (
+    PROJECT_ROOT / "outputs" / "FINAL_sku_mapping_decisions.csv"
+)
 
 # -----------------------------------------------------------------
 # Trained LightGBM SKU model settings
+#
+# The model is resolved through the registry using the configured
+# ml.model_id, exactly like the dashboard does, so this entry point and the
+# dashboard can never score with different packages. Hardcoding a filename
+# here would create a second source of truth that silently goes stale the
+# moment the configured champion changes.
 # -----------------------------------------------------------------
-MODEL_PATH = Path("models/alkabeer_sku_matcher_v1.joblib")
+from sku_mapping.config import load_config  # noqa: E402
+from sku_mapping.shadow.predictor import (  # noqa: E402
+    ShadowPackageError,
+    load_registered_shadow_package,
+)
+
 ML_AUTO_MATCH_THRESHOLD = 0.95
 ML_MANUAL_REVIEW_THRESHOLD = 0.70
 
-if not MODEL_PATH.exists():
-    raise FileNotFoundError(
-        f"Trained ML model not found: {MODEL_PATH.resolve()}\n"
-        "Place alkabeer_sku_matcher_v1.joblib inside the models folder."
+_config = load_config(PROJECT_ROOT / "config" / "default.yaml")
+if not _config.ml.model_id:
+    raise ValueError(
+        "config/default.yaml does not set ml.model_id, so no model can be "
+        "resolved. Set it to a registered model id."
     )
+try:
+    _registered = load_registered_shadow_package(
+        registry_path=_config.shadow_mode.registry_path,
+        model_directory=_config.shadow_mode.registry_path.parent / "registry",
+        model_id=_config.ml.model_id,
+        require_package_status=_config.shadow_mode.require_package_status,
+    )
+except ShadowPackageError as error:
+    raise SystemExit(
+        f"Configured model {_config.ml.model_id!r} could not be loaded from "
+        f"the registry: {error}"
+    ) from error
 
-_model_package = joblib.load(MODEL_PATH)
+MODEL_PATH = _registered.package_path
+_model_package = _registered.package
 sku_model = _model_package["model"]
+# Calibrated predictor from the registered package. When present, group
+# scoring uses calibrated probabilities so the packaged thresholds apply to
+# the same scale they were tuned on.
+sku_predictor = _model_package.get("predictor")
 MODEL_FEATURE_COLUMNS = _model_package["feature_columns"]
 ML_AUTO_MATCH_THRESHOLD = _model_package.get(
     "auto_match_threshold", ML_AUTO_MATCH_THRESHOLD
@@ -37,9 +82,16 @@ ML_MANUAL_REVIEW_THRESHOLD = _model_package.get(
     "manual_review_threshold", ML_MANUAL_REVIEW_THRESHOLD
 )
 MODEL_VERSION = _model_package.get("model_version", "v1")
+# ranked-v5 requires the whole candidate shortlist to compute relative
+# features (rank, gap-to-best, z-score).  When False the existing
+# single-candidate path is used unchanged.
+MODEL_REQUIRES_GROUP_FEATURES = _model_package.get("requires_group_features", False)
+RETRIEVAL_K = int(_model_package.get("retrieval_k", 20)) if MODEL_REQUIRES_GROUP_FEATURES else 1
 
-print(f"Loaded SKU ML model: {MODEL_PATH} ({MODEL_VERSION})")
+print(f"Loaded SKU ML model: {_config.ml.model_id}")
+print(f"Registered package: {MODEL_PATH.name} ({MODEL_VERSION})")
 print(f"ML feature count: {len(MODEL_FEATURE_COLUMNS)}")
+print(f"Group-relative ranking: {MODEL_REQUIRES_GROUP_FEATURES}  (k={RETRIEVAL_K})")
 
 # -----------------------------------------------------------------
 # Ollama LLM revision settings (Stage 2.5)
@@ -153,6 +205,15 @@ def extract_measures_detailed(text, include_total=True, include_unit=True):
     if not isinstance(text, str):
         return []
     t = text.lower().replace(",", "")
+    t = re.sub(
+        (
+            rf"(\d+(?:\.\d+)?)\s*({ALL_UNITS})\s*(?:x|\*|\u00d7)\s*"
+            rf"(\d+(?:\.\d+)?)\s*(?:pkts?|packets?|packs?)\s*"
+            rf"(?:x|\*|\u00d7)\s*(\d+(?:\.\d+)?)"
+        ),
+        r"\1 \2 x \3 x \4",
+        t,
+    )
     out = []
     occupied = []
 
@@ -254,31 +315,21 @@ def categorize(text):
 df["category"] = df["Product"].apply(categorize)
 master["category"] = master["Item-Cat-2"].map(CAT2_MAP).fillna(master["Item-Cat-2"].apply(categorize))
 
-def normalize_product_family(text):
-    # Fix: .replace("-frozen","") only handled the hyphenated form. Checked
-    # against this dump's real Product values -- "Breaded shrimp frozen"
-    # uses a space (no hyphen), so it wasn't being stripped and would have
-    # formed its own spurious competitor group. Word-boundary regex catches
-    # any separator (hyphen, space, underscore, none).
-    text = str(text).lower()
-    text = re.sub(r"\bfrozen\b", " ", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    tokens = [PRODUCT_TOKEN_ALIASES.get(tok, tok) for tok in text.split()]
-    return " ".join(tokens).strip()
-
-# Fix: plain punctuation/suffix stripping alone does NOT merge singular vs
-# plural spellings ("chicken nugget" vs "chicken nuggets" would still be
-# two groups). Checked against this dump's actual Product field: no such
-# duplicate pair currently exists there (it's a controlled taxonomy), so
-# this alias table has zero effect on today's grouping -- it's here as
-# defensive normalization for future data, deliberately kept to a small,
-# verified list rather than generic stemming (which can wrongly merge
-# unrelated families, e.g. "patty" vs "party").
-PRODUCT_TOKEN_ALIASES = {
-    "nugget": "nuggets", "burger": "burgers", "patty": "patties", "sausage": "sausages",
-    "strip": "strips", "wing": "wings", "prawn": "prawns", "shrimp": "shrimps",
-    "paratha": "parathas", "samosa": "samosas", "roll": "rolls",
-}
+# Family normalization moved to sku_mapping.features.product_family so the
+# alias table can be unit-tested and reused across clients. Behaviour is
+# unchanged apart from the wider alias table; the "frozen" word-boundary
+# strip and the token-level mapping are identical.
+#
+# The table is deliberately NOT generic stemming (which wrongly merges
+# "patty"/"party"). It only joins spellings of the same thing, and
+# audit_alias_collisions() reports every merge it performs so an unsafe
+# one is visible rather than silent. Run that against each new client's
+# Product column before trusting the table on their data -- see
+# scripts/audit_product_families.py.
+from sku_mapping.features.product_family import (  # noqa: E402
+    PRODUCT_TOKEN_ALIASES,
+    normalize_product_family,
+)
 
 df["product_family"] = df["Product"].apply(normalize_product_family)
 
@@ -325,7 +376,7 @@ def match_batch(sub_df, cat):
             # a real category (Chicken/Meat/etc.) with literally no master rows in it
             return [dict(matched_itemcode="NO_MATCH", matched_itemname="None", match_score=0.0, margin=0.0,
                          raw_margin=0.0, pack_status=None, confidence_tier="no_match_category",
-                         master_match_text="", master_measures=[])] * len(sub_df)
+                         master_match_text="", master_measures=[], top_k_candidates=[])] * len(sub_df)
 
     queries = sub_df["match_text"].tolist()
     choices = pool["match_text"].tolist()
@@ -341,7 +392,7 @@ def match_batch(sub_df, cat):
         if len(row.match_text.split()) < 2:
             results.append(dict(matched_itemcode="NO_MATCH", matched_itemname="None", match_score=0.0,
                                  margin=0.0, raw_margin=0.0, pack_status=None, confidence_tier="no_match_empty_text",
-                                 master_match_text="", master_measures=[]))
+                                 master_match_text="", master_measures=[], top_k_candidates=[]))
             continue
 
         row_scores = score_matrix[i].copy()
@@ -391,7 +442,7 @@ def match_batch(sub_df, cat):
             results.append(dict(matched_itemcode="NO_MATCH", matched_itemname="None", match_score=round(float(best_score),2),
                                  margin=round(float(margin),2), raw_margin=round(float(raw_margin),2),
                                  pack_status=pack_status, confidence_tier="no_match",
-                                 master_match_text="", master_measures=[]))
+                                 master_match_text="", master_measures=[], top_k_candidates=[]))
             continue
 
         # Fix (#2): "every candidate had an incompatible pack size" is a
@@ -415,11 +466,29 @@ def match_batch(sub_df, cat):
         else:
             conf = "low"
 
+        # Build top-K shortlist for group-feature models.
+        # Each entry carries everything _build_ml_feature_row needs.
+        top_k_list = []
+        for rank_i in eligible_order[:RETRIEVAL_K]:
+            mr = pool.iloc[rank_i]
+            top_k_list.append({
+                "Itemcode": mr["Itemcode"],
+                "Itemname": mr["Itemname"],
+                "Itemname_raw": mr["Itemname"],
+                "Item-Cat-4": mr.get("Item-Cat-4", ""),
+                "Item Description": mr.get("Item Description", ""),
+                "Item-Spec": mr.get("Item-Spec", ""),
+                "master_measures_detailed": mr.get("master_measures_detailed", []),
+                "match_score": round(float(row_scores[rank_i]), 2),
+            })
+
         results.append(dict(matched_itemcode=best_row["Itemcode"], matched_itemname=best_row["Itemname"],
                              match_score=round(float(best_score),2), margin=round(float(margin),2),
                              raw_margin=round(float(raw_margin),2),
                              pack_status=pack_status, confidence_tier=conf,
-                             master_match_text=best_row["match_text"], master_measures=best_row["master_measures"]))
+                             master_match_text=best_row["match_text"],
+                             master_measures=best_row["master_measures"],
+                             top_k_candidates=top_k_list))
     return results
 
 df["measures_key"] = df["offer_measures"].apply(tuple)
@@ -528,6 +597,16 @@ def _extract_bonus_weight(text):
 
 def _master_units_per_carton(spec):
     t = str(spec).lower().replace(",", "")
+    chained = re.search(
+        (
+            rf"\d+(?:\.\d+)?\s*(?:{ALL_UNITS})\s*(?:x|\*|\u00d7)\s*"
+            rf"\d+(?:\.\d+)?\s*(?:pkts?|packets?|packs?)\s*"
+            rf"(?:x|\*|\u00d7)\s*(\d+(?:\.\d+)?)"
+        ),
+        t,
+    )
+    if chained:
+        return float(chained.group(1))
     patterns = [
         rf"\d+(?:\.\d+)?\s*(?:{ALL_UNITS})\s*[x×*]\s*(\d+(?:\.\d+)?)",
         rf"(\d+(?:\.\d+)?)\s*[x×*]\s*\d+(?:\.\d+)?\s*(?:{ALL_UNITS})",
@@ -555,6 +634,19 @@ FAMILY_PHRASES = [
     "popcorn", "kibbeh", "kofta", "samosa", "samosas", "paratha",
     "fries", "wedges", "patties", "sausages", "shrimps", "prawns",
 ]
+FAMILY_CONCEPT_ALIASES = {
+    "beef burger": "burger",
+    "burgers": "burger",
+    "chicken burger": "burger",
+    "chicken fillet": "fillet",
+    "chicken fillets": "fillet",
+    "chicken fries": "fries",
+    "chicken nuggets": "nuggets",
+    "chicken popcorn": "popcorn",
+    "chicken strips": "strips",
+    "fillets": "fillet",
+    "samosas": "samosa",
+}
 VARIANT_WORDS = {
     "spicy", "non spicy", "non-spicy", "regular", "hot", "sriracha",
     "buffalo", "bbq", "barbecue", "onion", "breaded", "zing", "krazee",
@@ -574,6 +666,34 @@ def _family_set(text):
         if re.search(rf"\b{re.escape(phrase)}\b", t):
             found.add(phrase)
     return found
+
+
+def _family_concept_set(text):
+    return {
+        FAMILY_CONCEPT_ALIASES.get(family, family)
+        for family in _family_set(text)
+    }
+
+
+def _resolve_semantic_variant(offer_name, product, variant):
+    variant_text = str(variant or "").strip()
+    primary_text = " ".join(
+        value
+        for value in (
+            str(offer_name or "").strip(),
+            str(product or "").strip(),
+        )
+        if value
+    )
+    primary_proteins = _protein_set(primary_text)
+    variant_proteins = _protein_set(variant_text)
+    if (
+        primary_proteins
+        and variant_proteins
+        and not primary_proteins.intersection(variant_proteins)
+    ):
+        return ""
+    return variant_text
 
 
 def _variant_set(text):
@@ -598,10 +718,17 @@ def _expected_match_count(text):
 
 
 def _build_ml_feature_row(offer_row, master_row):
+    offer_name = str(offer_row.get("Offer Name", ""))
+    offer_product = str(offer_row.get("Product", ""))
+    semantic_variant = _resolve_semantic_variant(
+        offer_name,
+        offer_product,
+        offer_row.get("Variant", ""),
+    )
     offer_text = " ".join([
-        str(offer_row.get("Offer Name", "")),
-        str(offer_row.get("Product", "")),
-        str(offer_row.get("Variant", "")),
+        offer_name,
+        offer_product,
+        semantic_variant,
     ]).strip()
     master_text = " ".join([
         str(master_row.get("Itemname", "")),
@@ -634,7 +761,7 @@ def _build_ml_feature_row(offer_row, master_row):
     token_similarity = fuzz.WRatio(offer_clean, master_clean)
 
     mixed_protein = int(len(offer_proteins) > 1)
-    multi_family = int(len(offer_families) > 1)
+    multi_family = int(len(_family_concept_set(offer_text)) > 1)
     contains_non_meat = int(bool(
         set(re.findall(r"[a-z]+", offer_text.lower())) & NON_MEAT_WORDS
     ))
@@ -704,42 +831,164 @@ ml_probabilities = []
 ml_decisions = []
 ml_feature_json = []
 
-for _, offer_row in own_keys.iterrows():
-    itemcode = str(offer_row.get("suggested_itemcode", "")).strip()
+if MODEL_REQUIRES_GROUP_FEATURES:
+    # ------------------------------------------------------------------
+    # Group-scoring path for ranked-v5.
+    # Featurise the whole top-K shortlist together so the rank/gap/z-score
+    # features are computed relative to the real candidate set, exactly as
+    # during training.
+    # ------------------------------------------------------------------
+    from sku_mapping.features.discriminative_features import build_extra_features
+    from sku_mapping.features.rank_features import build_rank_feature_frame
 
-    if itemcode in {"", "NO_MATCH", "REVIEW_REQUIRED", "nan"}:
-        ml_probabilities.append(np.nan)
-        ml_decisions.append("NO_CANDIDATE")
-        ml_feature_json.append("")
-        continue
+    for _, offer_row in own_keys.iterrows():
+        candidates = offer_row.get("top_k_candidates")
+        if not candidates:
+            ml_probabilities.append(np.nan)
+            ml_decisions.append("NO_CANDIDATE")
+            ml_feature_json.append("")
+            continue
 
-    if itemcode not in _master_lookup.index:
-        ml_probabilities.append(np.nan)
-        ml_decisions.append("MASTER_SKU_NOT_FOUND")
-        ml_feature_json.append("")
-        continue
+        # Build base + extra features for every candidate in the shortlist.
+        shortlist_features = []
+        valid_candidates = []
+        for cand in candidates:
+            cand_itemcode = str(cand.get("Itemcode", "")).strip()
+            if cand_itemcode not in _master_lookup.index:
+                continue
+            master_row = _master_lookup.loc[cand_itemcode]
+            if isinstance(master_row, pd.DataFrame):
+                master_row = master_row.iloc[0]
+            base = _build_ml_feature_row(offer_row, master_row)
+            offer_text_for_extra = " ".join(filter(None, [
+                str(offer_row.get("Offer Name", "")),
+                str(offer_row.get("Product", "")),
+            ]))
+            master_text_for_extra = " ".join(filter(None, [
+                str(master_row.get("Itemname", "")),
+                str(master_row.get("Item-Spec", "")),
+            ]))
+            base.update(build_extra_features(offer_text_for_extra, master_text_for_extra))
+            shortlist_features.append(base)
+            valid_candidates.append(cand)
 
-    master_row = _master_lookup.loc[itemcode]
-    if isinstance(master_row, pd.DataFrame):
-        master_row = master_row.iloc[0]
+        if not shortlist_features:
+            ml_probabilities.append(np.nan)
+            ml_decisions.append("MASTER_SKU_NOT_FOUND")
+            ml_feature_json.append("")
+            continue
 
-    feature_row = _build_ml_feature_row(offer_row, master_row)
-    probability = _predict_ml_probability(feature_row)
+        # Build ranked feature frame and score the whole group at once.
+        feature_frame = build_rank_feature_frame(shortlist_features)
+        feature_frame = feature_frame.reindex(columns=MODEL_FEATURE_COLUMNS).fillna(-1)
+        if sku_predictor is not None:
+            probabilities = np.asarray(
+                sku_predictor.predict_calibrated_proba(feature_frame),
+                dtype=float,
+            )
+        else:
+            probabilities = sku_model.predict_proba(feature_frame)[:, 1]
 
-    if probability >= ML_AUTO_MATCH_THRESHOLD:
-        decision = "AUTO_MATCH"
-    elif probability >= ML_MANUAL_REVIEW_THRESHOLD:
-        decision = "MANUAL_REVIEW"
-    else:
-        decision = "NO_MATCH"
+        best_pos = int(np.argmax(probabilities))
+        probability = float(probabilities[best_pos])
+        best_cand = valid_candidates[best_pos]
 
-    ml_probabilities.append(probability)
-    ml_decisions.append(decision)
-    ml_feature_json.append(json.dumps(feature_row, allow_nan=True))
+        # If the ranked model promotes a different candidate than Stage 2's
+        # top-1 fuzzy match, update suggested_itemcode accordingly.
+        promoted_itemcode = str(best_cand.get("Itemcode", "")).strip()
+        if promoted_itemcode != str(offer_row.get("suggested_itemcode", "")).strip():
+            own_keys.at[offer_row.name, "suggested_itemcode"] = promoted_itemcode
+            own_keys.at[offer_row.name, "suggested_itemname"] = str(best_cand.get("Itemname", ""))
+
+        if probability >= ML_AUTO_MATCH_THRESHOLD:
+            decision = "AUTO_MATCH"
+        elif probability >= ML_MANUAL_REVIEW_THRESHOLD:
+            decision = "MANUAL_REVIEW"
+        else:
+            decision = "NO_MATCH"
+
+        ml_probabilities.append(probability)
+        ml_decisions.append(decision)
+        ml_feature_json.append(json.dumps(shortlist_features[best_pos], allow_nan=True))
+
+else:
+    # ------------------------------------------------------------------
+    # Original single-candidate path for v1/v2/v3 models.
+    # ------------------------------------------------------------------
+    for _, offer_row in own_keys.iterrows():
+        itemcode = str(offer_row.get("suggested_itemcode", "")).strip()
+
+        if itemcode in {"", "NO_MATCH", "REVIEW_REQUIRED", "nan"}:
+            ml_probabilities.append(np.nan)
+            ml_decisions.append("NO_CANDIDATE")
+            ml_feature_json.append("")
+            continue
+
+        if itemcode not in _master_lookup.index:
+            ml_probabilities.append(np.nan)
+            ml_decisions.append("MASTER_SKU_NOT_FOUND")
+            ml_feature_json.append("")
+            continue
+
+        master_row = _master_lookup.loc[itemcode]
+        if isinstance(master_row, pd.DataFrame):
+            master_row = master_row.iloc[0]
+
+        feature_row = _build_ml_feature_row(offer_row, master_row)
+        probability = _predict_ml_probability(feature_row)
+
+        if probability >= ML_AUTO_MATCH_THRESHOLD:
+            decision = "AUTO_MATCH"
+        elif probability >= ML_MANUAL_REVIEW_THRESHOLD:
+            decision = "MANUAL_REVIEW"
+        else:
+            decision = "NO_MATCH"
+
+        ml_probabilities.append(probability)
+        ml_decisions.append(decision)
+        ml_feature_json.append(json.dumps(feature_row, allow_nan=True))
 
 own_keys["ml_probability"] = ml_probabilities
 own_keys["ml_decision"] = ml_decisions
 own_keys["ml_feature_json"] = ml_feature_json
+
+# -----------------------------------------------------------------
+# PHASE 6A: explicit assisted deployment (default remains disabled)
+# -----------------------------------------------------------------
+# The legacy v1 decision above remains the safe fallback. Assisted mode loads
+# only the explicitly configured registered v3 package, uses the shared
+# feature generator, records threshold provenance, and cannot make a hard
+# conflict eligible for automatic acceptance. No model fitting occurs here.
+_assisted_config = None
+_assisted_result = None
+try:
+    from sku_mapping.config import load_config
+    from sku_mapping.constants import MLDeploymentMode
+    from sku_mapping.inference.pipeline import (
+        run_unified_inference_non_blocking,
+    )
+
+    _assisted_config = load_config("config/default.yaml")
+    if _assisted_config.ml.mode is MLDeploymentMode.ASSISTED:
+        _assisted_result = run_unified_inference_non_blocking(
+            own_keys,
+            master,
+            config=_assisted_config,
+            source_path=FLYER_PATH,
+        )
+        own_keys = _assisted_result.rows
+        print(
+            "Assisted ML status: "
+            f"{_assisted_result.status}; "
+            f"threshold={_assisted_config.ml.auto_accept_threshold:.3f}; "
+            "threshold_source=user_configured; "
+            "production_threshold_approved=false"
+        )
+except Exception:
+    logging.getLogger("sku_mapping.ml.deployment").exception(
+        "Assisted mode failed non-fatally; retaining existing production "
+        "decisions"
+    )
 
 # The ML decision is now the definitive auto-acceptance gate.
 own_keys["confidence_tier"] = np.select(
@@ -798,6 +1047,35 @@ df.loc[~df["is_own"], not_own_cols_revised] = [
 
 print(f"After stage 2.5, elapsed: {time.time()-t_start:.1f}s")
 
+# Unified assisted inference already writes the unchanged shadow and
+# monitoring artifacts before applying final decisions. The Phase 6A
+# monitoring function remains as a compatibility fallback for callers that
+# return the earlier result type.
+if _assisted_result is not None and _assisted_config is not None:
+    try:
+        _assisted_monitoring = getattr(
+            _assisted_result, "shadow_result", None
+        )
+        if _assisted_monitoring is None:
+            from sku_mapping.ml.deployment import (
+                run_assisted_monitoring_non_blocking,
+            )
+
+            _assisted_monitoring = run_assisted_monitoring_non_blocking(
+                df,
+                master,
+                config=_assisted_config,
+            )
+        print(
+            "Assisted monitoring status: "
+            f"{_assisted_monitoring.status}"
+        )
+    except Exception:
+        logging.getLogger("sku_mapping.ml.deployment").exception(
+            "Assisted monitoring failed non-fatally; continuing to "
+            "competitor discovery"
+        )
+
 # ===================================================================
 # STAGE 3: SKU-level competitor discovery
 # Fixes applied:
@@ -827,7 +1105,18 @@ t0 = time.time()
 RAW_FLOOR, ADJ_FLOOR = 60, 65
 
 df["measures_key"] = df["offer_measures"].apply(tuple)  # recompute after merge changed row order/columns
-candidates = df[df["is_own"] & df["confidence_tier"].isin(AUTO_ACCEPT_TIERS)].copy()
+if "final_eligible_mapping" in df.columns:
+    from sku_mapping.inference.pipeline import (
+        select_competitor_eligible_rows,
+    )
+
+    candidates = select_competitor_eligible_rows(
+        df[df["is_own"]]
+    )
+else:
+    candidates = df[
+        df["is_own"] & df["confidence_tier"].isin(AUTO_ACCEPT_TIERS)
+    ].copy()
 # NOTE: dedup key includes measures_key (the flyer row's OWN pack size), not just
 # matched_itemcode, because one master SKU can be sold/promoted at several real
 # pack sizes (270g / 500g / 750g+250g) and those must not collapse into one
@@ -928,7 +1217,50 @@ out_cols = ["Country","Retailer Name","Flyer Name","Analysis week","offerid","Of
             "segment","Product","Variant","Base Packsize","Offer Price","Regular Price","Discount_percent",
             "matched_itemcode","matched_itemname","suggested_itemcode","suggested_itemname",
             "match_score","margin","raw_margin","pack_status","confidence_tier","ml_probability","ml_decision","competitor_matches"]
+_assisted_export_columns = [
+    "assisted_mode", "assisted_run_id", "assisted_model_id",
+    "assisted_model_package_sha256", "assisted_raw_probability",
+    "assisted_calibrated_probability", "assisted_auto_accept_threshold",
+    "assisted_threshold_source", "assisted_production_threshold_approved",
+    "assisted_decision", "assisted_decision_reason",
+    "assisted_safety_override_applied", "assisted_conflict_flags",
+]
+_unified_export_columns = [
+    "offer_id", "offer_description", "matched_master_sku",
+    "matched_master_description", "final_decision", "decision_source",
+    "final_decision_reason", "final_eligible_mapping",
+    "lightgbm_probability", "embedding_similarity",
+    "lightgbm_embedding_agreement", "agreement_status",
+    "agreement_route", "llm_decision", "llm_confidence",
+    "human_review_status", "model_id", "embedding_model_id",
+    "llm_model_id", "run_id", "hard_conflict",
+]
+out_cols.extend(
+    column for column in _assisted_export_columns if column in df.columns
+)
+out_cols.extend(
+    column for column in _unified_export_columns if column in df.columns
+)
 final = df[out_cols]
+if _assisted_result is not None:
+    _required_unified_columns = set(_unified_export_columns)
+    _missing_unified_columns = sorted(
+        _required_unified_columns - set(final.columns)
+    )
+    if _missing_unified_columns:
+        raise ValueError(
+            "Unified assisted export is missing provenance columns: "
+            f"{_missing_unified_columns}"
+        )
+    final.to_csv(
+        FINAL_SKU_MAPPING_DECISIONS_CSV,
+        index=False,
+        encoding="utf-8-sig",
+    )
+    print(
+        "Unified SKU mapping decisions written: "
+        f"{FINAL_SKU_MAPPING_DECISIONS_CSV} ({len(final):,} rows)"
+    )
 print(f"DONE. rows: {len(final):,}  total time: {time.time()-t_start:.1f}s")
 
 # ===================================================================
@@ -1026,3 +1358,26 @@ file2["Competitor Offers"] = file2["Itemcode"].map(offer_grp).fillna("")
 file2 = file2.rename(columns={"sku_label": "Al Kabeer Master SKU"}).drop(columns=["Itemcode"])
 file2.to_csv(FINAL_COMPETITOR_CSV, index=False, encoding="utf-8-sig")
 print(f"Final competitor-offers CSV written: {FINAL_COMPETITOR_CSV} ({len(file2):,} rows)")
+
+# ===================================================================
+# OPTIONAL PHASE 5D SHADOW SIDECAR
+# ===================================================================
+# This hook deliberately runs only after both authoritative production files
+# have been validated and written. The repository default is disabled. Any
+# configuration, registry, package, feature, prediction, or output failure is
+# logged and cannot fail or revise the completed production pipeline.
+try:
+    from sku_mapping.shadow.pipeline import run_configured_shadow_sidecar
+
+    _shadow_result = run_configured_shadow_sidecar(df, master)
+    if _shadow_result.status != "DISABLED":
+        print(
+            "Shadow sidecar status: "
+            f"{_shadow_result.status} "
+            f"({_shadow_result.prediction_rows:,} candidate rows)"
+        )
+except Exception:
+    logging.getLogger("sku_mapping.shadow").exception(
+        "Optional shadow sidecar failed after production exports; "
+        "authoritative output files remain unchanged"
+    )

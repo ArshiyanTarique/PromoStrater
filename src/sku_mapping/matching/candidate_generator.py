@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -164,6 +165,8 @@ class CandidateGenerator:
         self,
         offers: pd.DataFrame,
         top_k: int = 5,
+        *,
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[list[CandidateMatch]]:
         """Rank candidates using one RapidFuzz score matrix per category."""
         _require_columns(offers, REQUIRED_OFFER_COLUMNS, "offers")
@@ -174,6 +177,7 @@ class CandidateGenerator:
             return results
 
         indexed_offers = offers.reset_index(drop=True)
+        processed_offers = 0
         for category, positions in indexed_offers.groupby("category", sort=True).groups.items():
             position_list = list(positions)
             subset = indexed_offers.iloc[position_list].reset_index(drop=True)
@@ -181,17 +185,39 @@ class CandidateGenerator:
             if pool is None:
                 for position in position_list:
                     results[position] = [_no_match(str(category), "no_match_category")]
+                processed_offers += len(position_list)
+                if progress is not None:
+                    progress(processed_offers, len(indexed_offers))
                 continue
             queries = subset["match_text"].tolist()
             choices = pool["match_text"].tolist()
-            score_matrix = (
-                process.cdist(queries, choices, scorer=fuzz.token_sort_ratio)
-                + process.cdist(queries, choices, scorer=fuzz.token_set_ratio)
-            ) / 2.0
+            # Batch cdist so progress fires every ~500 offers instead of
+            # once per category (which can be 10,000+ offers).
+            BATCH = 500
+            score_matrix_parts = []
+            for batch_start in range(0, len(queries), BATCH):
+                batch_queries = queries[batch_start:batch_start + BATCH]
+                if not batch_queries:
+                    continue
+                score_matrix_parts.append(
+                    (
+                        process.cdist(batch_queries, choices, scorer=fuzz.token_sort_ratio)
+                        + process.cdist(batch_queries, choices, scorer=fuzz.token_set_ratio)
+                    ) / 2.0
+                )
+                if progress is not None:
+                    progress(
+                        processed_offers + batch_start + len(batch_queries),
+                        len(indexed_offers),
+                    )
+            score_matrix = np.vstack(score_matrix_parts) if score_matrix_parts else np.empty((0, len(choices)))
             for row_position, (_, offer_row) in enumerate(subset.iterrows()):
                 results[position_list[row_position]] = self._rank_row(
                     offer_row, pool, score_matrix[row_position].copy(), top_k
                 )
+            processed_offers += len(position_list)
+            if progress is not None:
+                progress(processed_offers, len(indexed_offers))
         return results
 
     def generate_top_candidates(

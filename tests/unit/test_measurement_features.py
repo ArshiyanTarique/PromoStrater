@@ -54,6 +54,12 @@ def test_master_case_excludes_carton_total() -> None:
     assert all(value != 5400.0 for value, _, _ in details)
 
 
+def test_compact_twin_pack_master_spec_keeps_unit_and_outer_carton_count() -> None:
+    details = extract_master_measures("400 Gmsx2Pktx6")
+    assert details == [(400.0, "weight", 1)]
+    assert _master_units_per_carton("400 Gmsx2Pktx6") == 6.0
+
+
 def test_bonus_and_piece_count_extraction() -> None:
     assert _extract_bonus_weight("Chicken Nuggets 750g + 250g") == 250.0
     assert _extract_piece_count("Chicken Nuggets 20 pcs") == 20.0

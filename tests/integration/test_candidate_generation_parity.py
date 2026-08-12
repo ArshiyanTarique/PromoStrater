@@ -26,7 +26,15 @@ def _legacy_match_batch() -> tuple[dict[str, Any], Any]:
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in names
     ]
-    namespace: dict[str, Any] = {"pd": pd, "np": np, "fuzz": fuzz, "process": process}
+    namespace: dict[str, Any] = {
+        "pd": pd,
+        "np": np,
+        "fuzz": fuzz,
+        "process": process,
+        # match_batch reads the module-level shortlist size; the ranked
+        # package's default is 20 and parity only compares Stage 2 fields.
+        "RETRIEVAL_K": 20,
+    }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(source_path), "exec"), namespace)
     return namespace, namespace["match_batch"]
 

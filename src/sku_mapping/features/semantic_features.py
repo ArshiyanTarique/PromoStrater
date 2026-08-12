@@ -64,6 +64,19 @@ FAMILY_PHRASES = [
     "shrimps",
     "prawns",
 ]
+FAMILY_CONCEPT_ALIASES = {
+    "beef burger": "burger",
+    "burgers": "burger",
+    "chicken burger": "burger",
+    "chicken fillet": "fillet",
+    "chicken fillets": "fillet",
+    "chicken fries": "fries",
+    "chicken nuggets": "nuggets",
+    "chicken popcorn": "popcorn",
+    "chicken strips": "strips",
+    "fillets": "fillet",
+    "samosas": "samosa",
+}
 VARIANT_WORDS = {
     "spicy",
     "non spicy",
@@ -83,20 +96,72 @@ VARIANT_WORDS = {
 }
 
 
+# Fix: PROTEIN_WORDS lists both spellings of the same protein, so an offer
+# saying "BREADED SHRIMP" produced {"shrimp"} while the master "BREADED SHRIMPS
+# 250 / PRAWNS-SHRIMPS" produced {"shrimps", "prawns"}. The two sets did not
+# intersect, so _compatibility_flag reported a protein CONTRADICTION for a pair
+# that is in fact the same product. Canonicalizing to one spelling removes the
+# false contradiction without widening what counts as a protein.
+PROTEIN_CANONICAL = {"shrimp": "shrimps", "prawn": "prawns"}
+
+
 def _protein_set(text: object) -> set[str]:
-    """Return recognized protein tokens."""
+    """Return recognized protein tokens, canonicalized to one spelling."""
     tokens = set(re.findall(r"[a-z]+", str(text).lower()))
-    return tokens & PROTEIN_WORDS
+    return {PROTEIN_CANONICAL.get(word, word) for word in tokens & PROTEIN_WORDS}
 
 
 def _family_set(text: object) -> set[str]:
     """Return recognized product-family phrases."""
     normalized = re.sub(r"[^a-z0-9]+", " ", str(text).lower())
+    # Fix: the master spells this family "POP-CORN", which the punctuation strip
+    # above turns into "pop corn", but FAMILY_PHRASES only holds "popcorn".
+    # No popcorn SKU could ever set family_match=1 against a "POPCORN" offer.
+    normalized = re.sub(r"\bpop corn\b", "popcorn", normalized)
     found: set[str] = set()
     for phrase in FAMILY_PHRASES:
         if re.search(rf"\b{re.escape(phrase)}\b", normalized):
             found.add(phrase)
     return found
+
+
+def _family_concept_set(text: object) -> set[str]:
+    """Collapse nested and singular/plural phrases into product concepts."""
+    return {
+        FAMILY_CONCEPT_ALIASES.get(family, family)
+        for family in _family_set(text)
+    }
+
+
+def _resolve_semantic_variant(
+    offer_name: object,
+    product: object,
+    variant: object,
+) -> str:
+    """Ignore a protein Variant that contradicts explicit source meaning.
+
+    The raw Variant remains untouched for traceability and exports. This
+    helper only controls semantic parsing and therefore cannot copy values
+    from, or depend on, a candidate Product Master row.
+    """
+    variant_text = "" if variant is None else str(variant).strip()
+    primary_text = " ".join(
+        value
+        for value in (
+            "" if offer_name is None else str(offer_name).strip(),
+            "" if product is None else str(product).strip(),
+        )
+        if value
+    )
+    primary_proteins = _protein_set(primary_text)
+    variant_proteins = _protein_set(variant_text)
+    if (
+        primary_proteins
+        and variant_proteins
+        and not primary_proteins.intersection(variant_proteins)
+    ):
+        return ""
+    return variant_text
 
 
 def _variant_set(text: object) -> set[str]:

@@ -1,0 +1,14 @@
+case_id,source_offer,expected_entity_count,expected_conjunction,expected_entities
+shared_family_proteins,Chicken / Beef Burger Patty 400 gm,2,UNKNOWN_MULTI_PRODUCT,Chicken Burger Patty 400 g||Beef Burger Patty 400 g
+shared_protein_families,Chicken Nuggets / Popcorn 400 gm,2,UNKNOWN_MULTI_PRODUCT,Chicken Nuggets 400 g||Chicken Popcorn 400 g
+separate_sizes,Chicken Nuggets 400 gm + Chicken Popcorn 500 gm,2,BUNDLE,Chicken Nuggets 400 g||Chicken Popcorn 500 g
+and_products,Chicken Nuggets and Beef Burger Patties,2,AND,Chicken Nuggets||Beef Burger Patty
+or_products,Chicken Samosas or Beef Samosas 240 gm,2,OR,Chicken Samosa 240 g||Beef Samosa 240 g
+promotional_bonus,Chicken Nuggets + Free Chicken Popcorn,2,PROMOTIONAL_BONUS,Chicken Nuggets||Free Chicken Popcorn
+promo_quantity,Chicken Nuggets 800 gm + 200 gm Free,1,SINGLE,Chicken Nuggets 800 g + 200 g Free
+ingredient_and,Chicken and Cheese Sausages 400 gm,1,SINGLE,Chicken and Cheese Sausages 400 g
+variant_and,Sweet and Spicy Chicken Wings,1,SINGLE,Sweet and Spicy Chicken Wings
+ingredient_herb,Beef and Herb Meatballs,1,SINGLE,Beef and Herb Meatballs
+mixed_dedicated,Mixed Grill Pack,1,SINGLE,Mixed Grill Pack
+ambiguous_weight,Chicken Nuggets / Beef Burger Patty 400 gm,2,UNKNOWN_MULTI_PRODUCT,Chicken Nuggets 400 g||Beef Burger Patty 400 g
+partial_master_coverage,Chicken Nuggets + Beef Kofta 400 gm,2,BUNDLE,Chicken Nuggets 400 g||Beef Kofta 400 g

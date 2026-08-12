@@ -52,3 +52,22 @@ def test_product_master_preprocessing_never_uses_carton_total_as_retail_pack() -
     assert prepared.loc[0, "Itemcode"] == "001"
     assert prepared.loc[0, "master_measures_detailed"] == [(270.0, "weight", 1)]
     assert (5400.0, "weight") not in prepared.loc[0, "master_measures"]
+
+
+def test_contradictory_variant_is_excluded_only_from_semantic_match_text() -> None:
+    original = pd.DataFrame(
+        [
+            {
+                "Offer Name": "Al Kabeer Chicken Samosas 240 gm",
+                "Product": "Samosa-Frozen",
+                "Brand Name": "Al Kabeer",
+                "Variant": "Mutton",
+                "Base Packsize": "240 gm",
+            }
+        ]
+    )
+    prepared = preprocess_clickflyer(original)
+
+    assert prepared.loc[0, "Variant"] == "Mutton"
+    assert "mutton" not in prepared.loc[0, "match_text"]
+    assert "chicken" in prepared.loc[0, "match_text"]
