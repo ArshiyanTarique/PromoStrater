@@ -739,8 +739,17 @@ def _merge_llm_results(results: list[Any]) -> Any:
             else getattr(first, "error", None)
         ),
         results=combined_results,
+        # Empty chunk frames are dropped before concatenating. A chunk that
+        # reviewed nothing contributes no rows but does contribute its dtypes,
+        # and an empty float column widens an int column it is concatenated
+        # with - so llm_retry_count arrived as 0.0 where a single-pass run
+        # produced 0. Identical values, different dtype, different CSV bytes.
+        # If every chunk is empty the first is kept, so an all-empty merge
+        # still yields the right columns.
         frame=pd.concat(
-            [item.frame for item in results], ignore_index=True
+            [item.frame for item in results if not item.frame.empty]
+            or [results[0].frame],
+            ignore_index=True,
         ),
         offers_routed=sum(int(item.offers_routed or 0) for item in results),
         provider_calls=sum(
