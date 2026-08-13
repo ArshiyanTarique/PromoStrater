@@ -38,7 +38,11 @@ FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=timezone.utc)
 #: would make these tests take minutes, so the tests write the field directly to
 #: force several chunks over a handful of offers. The chunking mechanism itself
 #: is size-agnostic; only the configured bound is opinionated.
-TEST_CHUNK_SIZES = (2, 3, 4)
+#: 1 puts every offer in its own chunk, which maximises the number of chunk
+#: boundaries and therefore the chance of per-chunk state leaking. 5 leaves a
+#: remainder of 4, and 9 is the whole fixture in one chunk - the streaming code
+#: path exercised against the same input the single-pass path sees.
+TEST_CHUNK_SIZES = (1, 2, 3, 4, 5, 9)
 
 
 class _FakePredictor:

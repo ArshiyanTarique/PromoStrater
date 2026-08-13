@@ -1036,11 +1036,11 @@ def _unified_spool_schema(sources: list["Path"]) -> "Any":
     # metadata is taken from the widest source schema, which is the one that
     # describes the most columns of the union.
     metadata = None
-    widest = -1
+    widest_names: list[str] = []
     for source in sources:
         schema = pq.read_schema(source)
-        if len(schema.names) > widest:
-            widest = len(schema.names)
+        if len(schema.names) > len(widest_names):
+            widest_names = list(schema.names)
             metadata = schema.metadata
         for field in schema:
             existing = fields.get(field.name)
@@ -1078,8 +1078,16 @@ def _unified_spool_schema(sources: list["Path"]) -> "Any":
                 f"{existing.type} in {origin[field.name].name} versus "
                 f"{field.type} in {source.name}"
             )
+    # Column order follows the widest chunk - the one carrying the most
+    # columns - rather than the order columns were first seen. First-seen
+    # order makes the layout depend on WHICH chunk introduced a column, so a
+    # column absent from the early chunks lands at the end and the merged
+    # frame no longer matches a single-pass one. Anything the widest schema
+    # does not mention keeps first-seen order after it.
+    ordered_names = [name for name in widest_names if name in fields]
+    ordered_names += [name for name in order if name not in set(widest_names)]
     return pa.schema(
-        [fields[name] for name in order], metadata=metadata
+        [fields[name] for name in ordered_names], metadata=metadata
     )
 
 
