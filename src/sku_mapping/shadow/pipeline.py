@@ -996,8 +996,94 @@ def _merge_embedding_results(results: list[Any]) -> Any:
     )
 
 
+class ChunkSchemaConflictError(ValueError):
+    """Two chunks disagree on a column's type in a way that cannot be unified."""
+
+
+def _unified_spool_schema(sources: list["Path"]) -> "Any":
+    """Union every chunk's schema, preferring a concrete type over null.
+
+    Chunks legitimately differ: a chunk containing no reviewed offer writes the
+    review columns as all-null, which parquet records as the ``null`` type,
+    while a chunk that did review something writes them as strings. Neither is
+    wrong, and the merged file has to hold both.
+
+    Null yields to any concrete type because a null-typed column carries no
+    values to lose. Two different concrete types are NOT reconciled here - a
+    silent cast is how real data goes missing - so that case raises with both
+    types and the chunks that produced them.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    fields: dict[str, pa.Field] = {}
+    origin: dict[str, Path] = {}
+    order: list[str] = []
+    for source in sources:
+        for field in pq.read_schema(source):
+            existing = fields.get(field.name)
+            if existing is None:
+                fields[field.name] = field
+                origin[field.name] = source
+                order.append(field.name)
+                continue
+            if existing.type == field.type:
+                continue
+            if pa.types.is_null(existing.type):
+                fields[field.name] = field
+                origin[field.name] = source
+                continue
+            if pa.types.is_null(field.type):
+                continue
+            # Two concrete types. A chunk with no reviewed offer leaves the
+            # numeric review columns all-NaN, which pandas types as double,
+            # while a chunk that reviewed something writes int64 - and
+            # single-pass, seeing both in one frame, produces double for the
+            # same reason. Arrow decides whether such a pair is safely
+            # promotable; this code does not invent a cast of its own.
+            try:
+                promoted = pa.unify_schemas(
+                    [pa.schema([existing]), pa.schema([field])],
+                    promote_options="permissive",
+                )
+            except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError):
+                promoted = None
+            if promoted is not None:
+                fields[field.name] = promoted.field(field.name)
+                continue
+            raise ChunkSchemaConflictError(
+                f"Chunked run cannot merge column {field.name!r}: "
+                f"{existing.type} in {origin[field.name].name} versus "
+                f"{field.type} in {source.name}"
+            )
+    return pa.schema([fields[name] for name in order])
+
+
+def _align_to_schema(table: "Any", schema: "Any") -> "Any":
+    """Return *table* with the unified schema, missing columns as typed nulls."""
+    import pyarrow as pa
+
+    columns = []
+    for field in schema:
+        if field.name in table.column_names:
+            column = table.column(field.name)
+            columns.append(
+                column
+                if column.type == field.type
+                else column.cast(field.type)
+            )
+        else:
+            columns.append(pa.nulls(table.num_rows, type=field.type))
+    return pa.Table.from_arrays(columns, schema=schema)
+
+
 def _stream_parquet(sources: list[Path], destination: Path) -> None:
-    """Concatenate spooled chunks into one parquet without loading them all."""
+    """Concatenate spooled chunks into one parquet without loading them all.
+
+    The writer is opened on the union of every chunk's schema rather than on
+    the first chunk's. Pinning it to chunk 0 assumed all chunks carry the same
+    columns with the same types, which held only while no chunk could differ.
+    """
     import pyarrow.parquet as pq
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1010,11 +1096,12 @@ def _stream_parquet(sources: list[Path], destination: Path) -> None:
     temporary = Path(temporary_name)
     writer = None
     try:
+        schema = _unified_spool_schema(sources) if sources else None
         for source in sources:
             table = pq.read_table(source)
             if writer is None:
-                writer = pq.ParquetWriter(temporary, table.schema)
-            writer.write_table(table)
+                writer = pq.ParquetWriter(temporary, schema)
+            writer.write_table(_align_to_schema(table, schema))
             del table
         if writer is not None:
             writer.close()
