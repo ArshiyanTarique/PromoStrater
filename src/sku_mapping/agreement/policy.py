@@ -388,22 +388,54 @@ def _evaluate_offer(
     hard_conflict = any(conflicts.values())
 
     if not embedding_available:
-        reasons = [AgreementReasonCode.EMBEDDING_UNAVAILABLE]
+        # ML-only routing. A second scorer is not a precondition for a
+        # decision - it never was for safety, only for corroboration. When
+        # there is no second opinion the model's own confidence decides, and
+        # every safety gate above still runs first: a hard conflict or a
+        # missing master SKU is routed exactly as it would be with two
+        # scorers, because those are properties of the candidate, not of how
+        # many scorers looked at it.
+        #
+        # This replaces an unconditional SAFE_FALLBACK that could never
+        # auto-accept anything. With embeddings disabled that made the whole
+        # decision layer inert: every offer of a real run came back
+        # EMBEDDING_UNAVAILABLE and nothing was ever accepted, no matter how
+        # confident the model was.
+        reasons: list[AgreementReasonCode] = []
         if master_missing:
             reasons.append(AgreementReasonCode.MASTER_SKU_MISSING)
         if hard_conflict:
             reasons.append(AgreementReasonCode.HARD_CONFLICT)
+            return _result(
+                offer_id=offer_id,
+                lightgbm=lightgbm,
+                embedding=None,
+                conflicts=conflicts,
+                status=AgreementStatus.LIGHTGBM_ONLY,
+                route=config.hard_conflict_route,
+                reasons=reasons,
+            )
+        if lightgbm.top_score < config.lightgbm_auto_accept_threshold:
+            # Below the bar the candidate is not rejected, it is escalated:
+            # weak_agreement_route is the review queue a low-confidence match
+            # already went to, and is where an LLM reviewer reads it.
+            reasons.append(AgreementReasonCode.LIGHTGBM_BELOW_THRESHOLD)
+            return _result(
+                offer_id=offer_id,
+                lightgbm=lightgbm,
+                embedding=None,
+                conflicts=conflicts,
+                status=AgreementStatus.LIGHTGBM_ONLY,
+                route=config.weak_agreement_route,
+                reasons=reasons,
+            )
         return _result(
             offer_id=offer_id,
             lightgbm=lightgbm,
             embedding=None,
             conflicts=conflicts,
-            status=AgreementStatus.EMBEDDING_UNAVAILABLE,
-            route=(
-                config.hard_conflict_route
-                if hard_conflict
-                else ReviewRoute.SAFE_FALLBACK
-            ),
+            status=AgreementStatus.LIGHTGBM_ONLY,
+            route=ReviewRoute.AUTO_ACCEPT,
             reasons=reasons,
         )
 

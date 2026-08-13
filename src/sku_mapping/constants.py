@@ -41,6 +41,15 @@ class AgreementStatus(str, Enum):
     SAFE_AGREEMENT = "SAFE_AGREEMENT"
     WEAK_AGREEMENT = "WEAK_AGREEMENT"
     DISAGREEMENT = "DISAGREEMENT"
+    #: One scorer decided, on its own confidence. This is the production
+    #: state: the model is the matcher, and a low score escalates to review
+    #: rather than corroboration by a second scorer. Distinct from
+    #: SAFE_AGREEMENT so an audit can still tell a one-scorer decision from a
+    #: two-scorer one, and distinct from EMBEDDING_UNAVAILABLE because that
+    #: described a missing input rather than a decision that was reached.
+    LIGHTGBM_ONLY = "LIGHTGBM_ONLY"
+    #: Retained: historical rows carry it, and it is still the honest label
+    #: for a run made while a second scorer was expected but absent.
     EMBEDDING_UNAVAILABLE = "EMBEDDING_UNAVAILABLE"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
 

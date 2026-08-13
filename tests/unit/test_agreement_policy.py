@@ -149,16 +149,61 @@ def test_hard_conflict_routes_to_manual_review_even_with_high_scores() -> None:
     assert "HARD_CONFLICT" in result.routing_reason
 
 
-def test_embedding_unavailable_is_never_false_agreement() -> None:
+def test_ml_only_is_never_reported_as_agreement() -> None:
+    """One scorer must never be dressed up as two.
+
+    The original protection this test carried - a missing second scorer may
+    not become false corroboration - still holds. What changed is that the
+    absence of a second scorer no longer blocks a decision.
+    """
     result = _one(_candidates(embedding_unavailable=True))
-    assert (
-        result.agreement_status
-        is AgreementStatus.EMBEDDING_UNAVAILABLE
-    )
-    assert result.routing_decision is ReviewRoute.SAFE_FALLBACK
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.agreement_status not in {
+        AgreementStatus.SAFE_AGREEMENT,
+        AgreementStatus.WEAK_AGREEMENT,
+    }
     assert result.same_top_candidate is False
     assert result.embedding_top_candidate is None
-    assert "EMBEDDING_UNAVAILABLE" in result.routing_reason
+    assert result.embedding_similarity is None
+
+
+def test_ml_only_high_confidence_auto_accepts() -> None:
+    """Above the configured bar the model decides on its own."""
+    result = _one(_candidates(embedding_unavailable=True, probability=0.99))
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.routing_decision is ReviewRoute.AUTO_ACCEPT
+    assert "LIGHTGBM_BELOW_THRESHOLD" not in result.routing_reason
+
+
+def test_ml_only_low_confidence_routes_to_review() -> None:
+    """Below the bar the candidate is escalated, never silently accepted."""
+    result = _one(_candidates(embedding_unavailable=True, probability=0.10))
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "LIGHTGBM_BELOW_THRESHOLD" in result.routing_reason
+
+
+def test_ml_only_hard_conflict_still_overrides_a_confident_model() -> None:
+    """Confidence must not buy its way past a semantic conflict."""
+    result = _one(
+        _candidates(
+            embedding_unavailable=True, hard_conflict=True, probability=0.99
+        )
+    )
+    assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "HARD_CONFLICT" in result.routing_reason
+
+
+def test_ml_only_missing_master_never_auto_accepts() -> None:
+    """A candidate that is not in the master cannot be a mapping."""
+    result = _one(
+        _candidates(
+            embedding_unavailable=True, missing_master=True, probability=0.99
+        )
+    )
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "MASTER_SKU_MISSING" in result.routing_reason
 
 
 def test_lightgbm_unavailable_routes_to_safe_fallback() -> None:
