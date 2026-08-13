@@ -22,6 +22,7 @@ from sku_mapping.data.preprocessing import (
     preprocess_clickflyer,
     preprocess_product_master,
 )
+from sku_mapping.llm_review import reviewer as llm_reviewer
 from sku_mapping.shadow import pipeline as shadow_pipeline
 from sku_mapping.shadow.pipeline import (
     _frame_fingerprint,
@@ -207,6 +208,14 @@ class _FixedClock:
 
 def _run(tmp_path, monkeypatch, *, chunk_size: int, label: str, offers, master):
     monkeypatch.setattr(shadow_pipeline, "datetime", _FixedClock)
+    # The reviewer stamps each review with the wall clock at the moment it
+    # ran, which is correct for an audit field and is exactly why it has to
+    # be frozen here: two runs of the same input genuinely happen at
+    # different times, so a real clock makes the artifacts differ for a
+    # reason that has nothing to do with chunking. Freezing one clock and not
+    # the other left this path unpinned - invisible until routing began
+    # sending offers to review at all.
+    monkeypatch.setattr(llm_reviewer, "datetime", _FixedClock)
     monkeypatch.setattr(
         shadow_pipeline,
         "load_registered_shadow_package",
