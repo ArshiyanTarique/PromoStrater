@@ -1060,18 +1060,37 @@ def _read_spool_projection(sources: list[Path]) -> pd.DataFrame:
 
     if not sources:
         return pd.DataFrame()
-    available = pq.read_schema(sources[0]).names
-    keep = [
-        name
-        for name in available
-        if name not in _GLOBAL_STAGE_EXCLUDED_COLUMNS
+    # Each chunk is projected against its OWN schema. Reading every chunk with
+    # the first chunk's column list assumed all chunks carry the same columns,
+    # which held only while no chunk could differ: with routing inert nothing
+    # was ever reviewed, so the LLM columns were absent from all of them
+    # equally. Once one chunk contains a reviewed offer and another does not,
+    # their schemas genuinely differ and demanding chunk 0's columns from a
+    # chunk that lacks them raises rather than yielding a null column.
+    schemas = [pq.read_schema(source).names for source in sources]
+    keeps = [
+        [name for name in names if name not in _GLOBAL_STAGE_EXCLUDED_COLUMNS]
+        for names in schemas
     ]
+    # Union in first-seen order, so the column order a caller sees does not
+    # depend on which chunk happened to introduce a column. A single-pass run
+    # produces one frame carrying every column, and concat below fills a
+    # column a chunk never had with NaN - the same value a single-pass row
+    # that was never reviewed already carries.
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for keep in keeps:
+        for name in keep:
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
     frames = [
-        pd.read_parquet(source, columns=keep) for source in sources
+        pd.read_parquet(source, columns=keep)
+        for source, keep in zip(sources, keeps)
     ]
     combined = pd.concat(frames, ignore_index=True)
     frames.clear()
-    return combined
+    return combined.reindex(columns=ordered)
 
 
 def run_shadow_observation(
