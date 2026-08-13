@@ -1019,8 +1019,21 @@ def _unified_spool_schema(sources: list["Path"]) -> "Any":
     fields: dict[str, pa.Field] = {}
     origin: dict[str, Path] = {}
     order: list[str] = []
+    # pandas records its own dtypes in the parquet key-value metadata, and
+    # read_parquet uses them to restore an extension dtype that Arrow alone
+    # cannot express - an all-null Int64 column is indistinguishable from a
+    # float column of NaNs without it. Building a bare pa.schema() discards
+    # that, so a merged chunked file lost dtypes a single-pass file kept. The
+    # metadata is taken from the widest source schema, which is the one that
+    # describes the most columns of the union.
+    metadata = None
+    widest = -1
     for source in sources:
-        for field in pq.read_schema(source):
+        schema = pq.read_schema(source)
+        if len(schema.names) > widest:
+            widest = len(schema.names)
+            metadata = schema.metadata
+        for field in schema:
             existing = fields.get(field.name)
             if existing is None:
                 fields[field.name] = field
@@ -1056,7 +1069,9 @@ def _unified_spool_schema(sources: list["Path"]) -> "Any":
                 f"{existing.type} in {origin[field.name].name} versus "
                 f"{field.type} in {source.name}"
             )
-    return pa.schema([fields[name] for name in order])
+    return pa.schema(
+        [fields[name] for name in order], metadata=metadata
+    )
 
 
 def _align_to_schema(table: "Any", schema: "Any") -> "Any":
