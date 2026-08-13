@@ -32,6 +32,26 @@ competitors:
   # competitors and showed 5, several of them the same product from different
   # flyers. The dashboard detail lists scroll, so length is not a constraint.
   max_per_target: 0
+  # Order surviving competitors with the registered own-brand LightGBM package
+  # instead of the fuzzy score. RANKING ONLY: the model cannot admit a
+  # candidate, reject one, or override a protein/family/form/pack conflict, and
+  # its output is a raw margin - never a competitor probability. Off by default
+  # so the pre-ML ordering remains reachable without a code change.
+  ml_reranking_enabled: false
+  # Candidates per offer shortlist. 0 adopts the model package's own
+  # retrieval_k (20 for ranked-v5), the group size it was trained against.
+  ml_shortlist_top_k: 0
+  # Remove a rival's own brand tokens before featurisation. Their brand can
+  # never appear in Al Kabeer master text, so leaving it in costs a competitor
+  # roughly 4 raw-margin points for naming itself.
+  brand_stripping_enabled: true
+  # Competitors staged per master SKU into the learning store for human
+  # review. 0 stages nothing - a run that writes to the store should be
+  # something you turned on. Set it to e.g. 10 to start collecting the
+  # competitor ground truth that neither the rules nor the borrowed model
+  # have ever been measured against. Labels the TOP of each list, so it
+  # measures precision at the top, not recall.
+  review_staging_per_target: 0
 
 runtime:
   random_seed: 42

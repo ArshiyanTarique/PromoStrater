@@ -10,13 +10,6 @@ import streamlit as st
 from dashboard.bootstrap import load_dashboard_context
 from dashboard.components.common import safe_page_link
 from dashboard.components.dismiss import dismiss_button
-from dashboard.components.elapsed_clock import (
-    CLOCK_CSS,
-    ELAPSED_CLOCK_KEY,
-    caption_line_html,
-    clock_anchor_css,
-    metric_clock_css,
-)
 from dashboard.components.pipeline_flow import render_pipeline_flow
 from dashboard.components.run_status import (
     current_status,
@@ -229,16 +222,7 @@ if start_clicked and upload is not None:
 def render_run_facts(status: PipelineStatus) -> None:
     """Draw the shared facts, in the same wording the sidebar uses."""
     facts = status_facts(status)
-    # The clock's stylesheet rides along with a line that is drawn anyway. A
-    # style-only markdown call would open an empty block and space the panel
-    # out; pipeline_flow ships its own CSS the same way.
-    st.markdown(
-        CLOCK_CSS
-        + clock_anchor_css(status.elapsed_seconds, live=status.is_active)
-        + metric_clock_css(live=status.is_active)
-        + caption_line_html("File:", facts["File"]),
-        unsafe_allow_html=True,
-    )
+    st.caption(f"**File:** {facts['File']}")
     render_pipeline_flow(
         stage_key=status.stage_key,
         overall_percent=status.percent,
@@ -249,24 +233,25 @@ def render_run_facts(status: PipelineStatus) -> None:
     s1.metric("Status", facts["Status"])
     s2.metric("Stage", facts["Stage"])
     s3.metric("Progress", facts["Progress"])
-    # A real metric, whose value text the CSS above swaps for a live counter
-    # while the run is active. It is phase-locked to the same elapsed value the
-    # sidebar's clock uses, so the two read identically at every instant.
-    with s4.container(key=ELAPSED_CLOCK_KEY):
-        st.metric("Elapsed", facts["Elapsed"])
+    # Elapsed is whatever the server measured for this run at this poll:
+    # now - created_at while it is live, created_at -> finished_at once it is
+    # not. It advances because the panel redraws, not because anything on the
+    # client is counting, so it cannot run at its own speed or get ahead.
+    s4.metric("Elapsed", facts["Elapsed"])
 
 
-@st.fragment(run_every="1s")
+@st.fragment(run_every="0.5s")
 def live_run_panel() -> None:
     """Poll the durable job record on its own refresh cycle.
 
     Only this fragment reruns, so the page script never blocks and the panel
     is driven entirely by SQLite - a refresh or a second tab shows the same
-    live state. It resolves the snapshot the sidebar's own 1s fragment
-    resolves, so the two never drift apart between polls.
+    live state. It resolves the snapshot the sidebar's own fragment resolves,
+    so the two never drift apart between polls.
 
-    The 1s interval matches the elapsed clock's whole-second resolution; a
-    slower cycle makes the timer jump two seconds at a time.
+    The interval is half the elapsed reading's whole-second resolution, so a
+    redraw's own cost cannot push the next tick past a second boundary and make
+    the timer skip a number.
     """
     status = current_status(jobs, store)
     if not status.is_active:

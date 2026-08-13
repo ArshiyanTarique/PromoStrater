@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -251,6 +251,57 @@ MIGRATIONS: dict[int, str] = {
             ON processing_jobs(run_id);
         CREATE INDEX idx_processing_jobs_source_hash
             ON processing_jobs(source_file_hash, state);
+    """,
+    8: """
+        -- Competitor relationships awaiting human judgement.
+        --
+        -- Competitor discovery today is rules plus a borrowed own-brand
+        -- ranker, and neither has ever been measured, because no competitor
+        -- pair has ever been labelled. This table is where that ground truth
+        -- accumulates: the pipeline proposes, a reviewer decides, and a
+        -- future competitor model or threshold is calibrated from what is
+        -- recorded here. Nothing reads it for decisions yet - by design.
+        --
+        -- Deliberately separate from offer_decisions, which answers a
+        -- different question (is this offer this SKU) on a different
+        -- population. Merging them would blur two label sets that must stay
+        -- distinguishable when either is used for training.
+        CREATE TABLE competitor_decisions (
+            run_id TEXT NOT NULL,
+            master_sku TEXT NOT NULL,
+            competitor_offer_id TEXT NOT NULL,
+            competitor_offer_name TEXT,
+            competitor_brand TEXT,
+            master_name TEXT,
+            -- What the pipeline proposed, and on what evidence.
+            proposed_status TEXT NOT NULL,
+            proposed_reason TEXT,
+            rule_score REAL,
+            rule_adjusted_score REAL,
+            -- Raw margin, comparable only within one offer's shortlist, and
+            -- never a competitor probability. Null when ML was disabled.
+            lightgbm_score REAL,
+            lightgbm_rank INTEGER,
+            ranking_source TEXT,
+            model_id TEXT,
+            -- What a human said. PENDING until somebody looks at it.
+            decision TEXT NOT NULL DEFAULT 'PENDING',
+            reviewer TEXT,
+            decided_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, master_sku, competitor_offer_id),
+            CHECK (
+                decision IN ('PENDING', 'CONFIRMED', 'REJECTED', 'UNSURE')
+            )
+        );
+
+        CREATE INDEX idx_competitor_decisions_pending
+            ON competitor_decisions(decision, created_at);
+        CREATE INDEX idx_competitor_decisions_sku
+            ON competitor_decisions(master_sku, decision);
+        CREATE INDEX idx_competitor_decisions_run
+            ON competitor_decisions(run_id);
     """,
 }
 

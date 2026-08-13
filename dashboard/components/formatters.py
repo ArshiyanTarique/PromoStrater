@@ -139,11 +139,9 @@ def format_elapsed(seconds: float) -> str:
     run, so they must not disagree on wording - one reading "84s" beside the
     other reading "1m 24s" looks like a sync bug even when the values match.
 
-    Minutes are always printed, including for the first minute. A run's live
-    reading is a CSS counter that cannot change its own shape as it crosses
-    60s (see :mod:`dashboard.components.elapsed_clock`), so a shape that
-    switched would make the clock jump from "59s" to "1m 0s" and back to "45s"
-    when the same run finished.
+    Minutes are always printed, including for the first minute, so the reading
+    keeps one shape for the whole run instead of switching from "59s" to
+    "1m 0s" as it crosses a minute.
     """
     try:
         total = max(0, int(float(seconds)))

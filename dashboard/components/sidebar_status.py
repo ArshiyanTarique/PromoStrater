@@ -14,11 +14,6 @@ import streamlit as st
 
 from dashboard.components.common import safe_page_link
 from dashboard.components.dismiss import dismiss_button
-from dashboard.components.elapsed_clock import (
-    CLOCK_CSS,
-    caption_clock_html,
-    clock_anchor_css,
-)
 from dashboard.components.formatters import get_status_color, render_badge_html
 from dashboard.components.run_status import current_status, status_facts
 from dashboard.services.pipeline_status import (
@@ -33,12 +28,15 @@ from sku_mapping.learning.store import LearningStore
 _safe_page_link = safe_page_link
 
 
-@st.fragment(run_every="1s")
+@st.fragment(run_every="0.5s")
 def _polling_status_body(store: LearningStore, jobs: JobReader) -> None:
-    """Redraw the card on its own 1s cycle while a run is active.
+    """Redraw the card on its own poll cycle while a run is active.
 
-    The interval is the elapsed clock's resolution: ``format_elapsed`` renders
-    whole seconds, so anything slower makes the timer visibly skip.
+    Twice the resolution of the elapsed reading, which ``format_elapsed``
+    renders in whole seconds. Polling on the second itself does not hold: each
+    redraw costs a little time, so the next tick lands late and the timer skips
+    a number. Sampling twice per second keeps the reading within half a second
+    of the run's real age no matter where the polls fall.
     """
     status = _render_status_body(store, jobs)
     if not status.is_active:
@@ -94,18 +92,8 @@ def _render_status_body(
         st.caption(f"**File:** {facts['File']}")
         st.caption(f"**Stage:** {facts['Stage']}")
         st.progress(status.progress_fraction)
-        # The clock's stylesheet rides along with the line that uses it, the
-        # way pipeline_flow ships its own CSS: a style-only markdown call would
-        # otherwise open an empty block and push the card apart.
-        st.markdown(
-            CLOCK_CSS
-            + clock_anchor_css(status.elapsed_seconds, live=status.is_active)
-            + caption_clock_html(
-                f"Progress: {facts['Progress']} · Elapsed: ",
-                facts["Elapsed"],
-                live=status.is_active,
-            ),
-            unsafe_allow_html=True,
+        st.caption(
+            f"Progress: {facts['Progress']} · Elapsed: {facts['Elapsed']}"
         )
         if status.run_id:
             st.caption(f"**Run ID:** `{status.run_id[:18]}...`")

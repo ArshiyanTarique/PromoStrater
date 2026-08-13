@@ -2174,3 +2174,170 @@ class LearningStore:
                 }
             finally:
                 connection.close()
+
+    # -- competitor review ------------------------------------------------
+    def stage_competitor_proposals(
+        self, proposals: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """Record competitor relationships for later human judgement.
+
+        Idempotent per (run_id, master_sku, competitor_offer_id): re-staging a
+        run refreshes the proposal but must never silently discard a verdict
+        somebody already gave, so an existing decided row keeps its decision,
+        reviewer, and timestamp.
+
+        Returns the number of rows written. Nothing in the pipeline reads this
+        table to make decisions - it exists to accumulate the ground truth
+        neither the rules nor the borrowed model have ever been measured
+        against.
+        """
+        if not proposals:
+            return 0
+        now = _now()
+        rows = []
+        for proposal in proposals:
+            run_id = str(proposal.get("run_id") or "").strip()
+            master_sku = str(proposal.get("master_sku") or "").strip()
+            offer_id = str(proposal.get("competitor_offer_id") or "").strip()
+            if not (run_id and master_sku and offer_id):
+                raise LearningStoreError(
+                    "competitor proposal requires run_id, master_sku, and "
+                    "competitor_offer_id"
+                )
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "master_sku": master_sku,
+                    "competitor_offer_id": offer_id,
+                    "competitor_offer_name": proposal.get(
+                        "competitor_offer_name"
+                    ),
+                    "competitor_brand": proposal.get("competitor_brand"),
+                    "master_name": proposal.get("master_name"),
+                    "proposed_status": str(
+                        proposal.get("proposed_status") or "UNKNOWN"
+                    ),
+                    "proposed_reason": proposal.get("proposed_reason"),
+                    "rule_score": _optional_float(proposal.get("rule_score")),
+                    "rule_adjusted_score": _optional_float(
+                        proposal.get("rule_adjusted_score")
+                    ),
+                    "lightgbm_score": _optional_float(
+                        proposal.get("lightgbm_score")
+                    ),
+                    "lightgbm_rank": _optional_int(
+                        proposal.get("lightgbm_rank")
+                    ),
+                    "ranking_source": proposal.get("ranking_source"),
+                    "model_id": proposal.get("model_id"),
+                    "created_at": now,
+                }
+            )
+        with self._lock:
+            connection = self._connect()
+            with connection:
+                connection.executemany(
+                    """
+                    INSERT INTO competitor_decisions (
+                        run_id, master_sku, competitor_offer_id,
+                        competitor_offer_name, competitor_brand, master_name,
+                        proposed_status, proposed_reason, rule_score,
+                        rule_adjusted_score, lightgbm_score, lightgbm_rank,
+                        ranking_source, model_id, decision, created_at
+                    ) VALUES (
+                        :run_id, :master_sku, :competitor_offer_id,
+                        :competitor_offer_name, :competitor_brand,
+                        :master_name, :proposed_status, :proposed_reason,
+                        :rule_score, :rule_adjusted_score, :lightgbm_score,
+                        :lightgbm_rank, :ranking_source, :model_id,
+                        'PENDING', :created_at
+                    )
+                    ON CONFLICT(run_id, master_sku, competitor_offer_id)
+                    DO UPDATE SET
+                        proposed_status = excluded.proposed_status,
+                        proposed_reason = excluded.proposed_reason,
+                        rule_score = excluded.rule_score,
+                        rule_adjusted_score = excluded.rule_adjusted_score,
+                        lightgbm_score = excluded.lightgbm_score,
+                        lightgbm_rank = excluded.lightgbm_rank,
+                        ranking_source = excluded.ranking_source,
+                        model_id = excluded.model_id
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    def record_competitor_decision(
+        self,
+        *,
+        run_id: str,
+        master_sku: str,
+        competitor_offer_id: str,
+        decision: str,
+        reviewer: str,
+        notes: str | None = None,
+    ) -> None:
+        """Record one human verdict on a staged competitor relationship."""
+        allowed = {"PENDING", "CONFIRMED", "REJECTED", "UNSURE"}
+        if decision not in allowed:
+            raise LearningStoreError(
+                f"{decision!r} is not a competitor decision: {sorted(allowed)}"
+            )
+        with self._lock:
+            connection = self._connect()
+            with connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE competitor_decisions
+                    SET decision = ?, reviewer = ?, notes = ?, decided_at = ?
+                    WHERE run_id = ?
+                      AND master_sku = ?
+                      AND competitor_offer_id = ?
+                    """,
+                    (
+                        decision,
+                        reviewer,
+                        notes,
+                        _now(),
+                        run_id,
+                        master_sku,
+                        competitor_offer_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise LearningStoreError(
+                        "No staged competitor relationship for "
+                        f"{run_id}/{master_sku}/{competitor_offer_id}"
+                    )
+
+    def competitor_decisions(
+        self, *, decision: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Read staged competitor relationships, newest first."""
+        query = "SELECT * FROM competitor_decisions"
+        parameters: list[Any] = []
+        if decision is not None:
+            query += " WHERE decision = ?"
+            parameters.append(decision)
+        query += " ORDER BY created_at DESC, master_sku, competitor_offer_id"
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters.append(int(limit))
+        with self._lock:
+            connection = self._connect()
+            rows = connection.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value is None or (isinstance(value, float) and value != value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> int | None:
+    parsed = _optional_float(value)
+    return None if parsed is None else int(parsed)

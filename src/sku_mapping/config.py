@@ -84,12 +84,40 @@ class CompetitorConfig:
     #: clears the score floors, which is the setting the dashboard expects: the
     #: detail lists scroll, so a long list costs nothing to display.
     max_per_target: int
+    #: Order surviving candidates with the registered own-brand model instead
+    #: of the fuzzy score. Ranking only - the model can never admit, reject, or
+    #: override a conflict, and its score is never read as a probability.
+    #: Defaults to off so the pre-ML ordering stays reachable by configuration.
+    ml_reranking_enabled: bool = False
+    #: Candidates per offer shortlist. ``0`` adopts the model package's own
+    #: ``retrieval_k``, which is the group size it was trained against.
+    ml_shortlist_top_k: int = 0
+    #: Drop a competitor's own brand tokens before featurisation. Their brand
+    #: can never appear in Al Kabeer master text, so leaving it in penalises a
+    #: rival for naming itself.
+    brand_stripping_enabled: bool = True
+    #: Competitors staged per master SKU for human review. ``0`` stages
+    #: nothing, which is the default: a run that writes to the learning store
+    #: should be something the operator turned on. Set it to a small number to
+    #: start accumulating the competitor ground truth that neither the rules
+    #: nor the borrowed model have ever been measured against.
+    review_staging_per_target: int = 0
 
     def __post_init__(self) -> None:
         if self.max_per_target < 0:
             raise ConfigurationError(
                 "competitors.max_per_target must be 0 (no limit) or a positive "
                 "integer"
+            )
+        if self.ml_shortlist_top_k < 0:
+            raise ConfigurationError(
+                "competitors.ml_shortlist_top_k must be 0 (use the model's "
+                "own retrieval_k) or a positive integer"
+            )
+        if self.review_staging_per_target < 0:
+            raise ConfigurationError(
+                "competitors.review_staging_per_target must be 0 (stage "
+                "nothing) or a positive integer"
             )
 
     @property
@@ -773,6 +801,20 @@ def load_config(path: str | Path) -> PipelineConfig:
             max_per_target=_as_int(
                 _required_value(competitors, "competitors", "max_per_target"),
                 "competitors.max_per_target",
+            ),
+            ml_reranking_enabled=bool(
+                competitors.get("ml_reranking_enabled", False)
+            ),
+            ml_shortlist_top_k=_as_int(
+                competitors.get("ml_shortlist_top_k", 0),
+                "competitors.ml_shortlist_top_k",
+            ),
+            brand_stripping_enabled=bool(
+                competitors.get("brand_stripping_enabled", True)
+            ),
+            review_staging_per_target=_as_int(
+                competitors.get("review_staging_per_target", 0),
+                "competitors.review_staging_per_target",
             ),
         ),
         runtime=RuntimeConfig(

@@ -79,3 +79,36 @@ def test_structure_detects_twin_pack_against_plain_one_kilogram() -> None:
     master = extract_master_measures("1kg")
     assert pack_is_compatible(collapse_to_simple(offer), collapse_to_simple(master)) is True
     assert pack_structure_agrees(offer, master) is False
+
+
+def test_master_gram_spelling_is_recognised() -> None:
+    """The master data spells grams "GRM"; the flyers spell it "gm".
+
+    While "grm" was unknown the master side parsed to nothing, so
+    ``pack_is_compatible`` answered None rather than False and no size
+    conflict could be raised for that SKU at all - a 550gm competitor sat
+    unchallenged under a 400 GRM Al Kabeer SKU.
+    """
+    assert collapse_to_simple(extract_master_measures("400 GRM")) == [
+        (400.0, "weight")
+    ]
+    assert collapse_to_simple(
+        extract_master_measures("12 PKTS X 400 GRM")
+    ) == [(400.0, "weight")]
+
+    master = collapse_to_simple(extract_master_measures("12 PKTS X 400 GRM"))
+    oversized = collapse_to_simple(
+        extract_flyer_measures("Cucina Tempura Chicken Fries 550gm")
+    )
+    matching = collapse_to_simple(
+        extract_flyer_measures("Americana Chicken Fries 400 gm")
+    )
+    assert pack_is_compatible(oversized, master) is False
+    assert pack_is_compatible(matching, master) is True
+
+
+def test_gram_spellings_agree_on_one_value() -> None:
+    for spelling in ("400 g", "400 gm", "400 gms", "400 grm", "400 grams"):
+        assert collapse_to_simple(extract_master_measures(spelling)) == [
+            (400.0, "weight")
+        ]

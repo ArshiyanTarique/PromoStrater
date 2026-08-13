@@ -147,6 +147,79 @@ class DashboardProcessResult:
     review_session_id: str | None
 
 
+def _competitor_review_staging(store, business, config: PipelineConfig, run_id: str) -> int:
+    """Stage a review queue from a finished run, never failing the run.
+
+    The outputs are already written and correct by the time this runs, so a
+    staging problem must degrade to "no queue this time" rather than losing a
+    two-hour run. Returns the number of rows staged, 0 when disabled.
+    """
+    per_target = int(
+        getattr(config.competitors, "review_staging_per_target", 0) or 0
+    )
+    if per_target <= 0:
+        return 0
+    try:
+        from sku_mapping.competitors.review import stage_competitor_review_queue
+
+        competitors = getattr(business, "competitors", None)
+        export = getattr(competitors, "export", None)
+        if export is None:
+            return 0
+        ml = (getattr(competitors, "diagnostics", None) or {}).get(
+            "ml_reranking", {}
+        )
+        return stage_competitor_review_queue(
+            store,
+            export,
+            run_id=run_id,
+            per_target=per_target,
+            model_id=(ml.get("model_id") or None),
+            ranking_source="lightgbm" if ml.get("enabled") else "rules",
+        )
+    except Exception:
+        LOGGER.exception(
+            "Competitor review staging failed; the run and its outputs stand"
+        )
+        return 0
+
+
+def _competitor_reranker(config: PipelineConfig):
+    """Build the competitor re-ranker when configuration asks for one.
+
+    Returns ``None`` whenever it is disabled or the package cannot be loaded,
+    which is the same value competitor discovery receives today - the rules
+    then order candidates exactly as they did before ML existed. The model is
+    resolved through the shadow registry, so a package that is unregistered or
+    not in ``SHADOW_MODE_ONLY`` is refused here as it would be for own-brand.
+    """
+    competitors = config.competitors
+    if not getattr(competitors, "ml_reranking_enabled", False):
+        return None
+    from sku_mapping.competitors.reranker import load_competitor_reranker
+
+    shadow = config.shadow_mode
+    model_directory = (
+        shadow.package_reference.parent
+        if shadow.package_reference is not None
+        else shadow.registry_path.parent / "registry"
+    )
+    reranker = load_competitor_reranker(
+        registry_path=shadow.registry_path,
+        model_directory=model_directory,
+        model_id=shadow.model_id,
+        package_reference=shadow.package_reference,
+        require_package_status=shadow.require_package_status,
+        strip_brand=getattr(competitors, "brand_stripping_enabled", True),
+    )
+    if reranker is None:
+        LOGGER.warning(
+            "Competitor ML re-ranking is enabled but no model package could "
+            "be loaded; competitor discovery will use rule ordering"
+        )
+    return reranker
+
+
 def _runtime_component_summary(
     request: DashboardProcessRequest,
     result: UnifiedInferenceResult,
@@ -531,6 +604,7 @@ class DashboardProcessingService:
                 competitor_audit_path=competitor_audit_path,
                 competitor_progress=update_competitors,
                 stage_progress=update_business_stage,
+                competitor_reranker=_competitor_reranker(effective),
                 # ``canonical_offers`` keeps one row per offer identity, which
                 # is what inference needs. Competitor discovery needs the
                 # variant-level rows: a ClickFlyer offer repeats once per
@@ -541,6 +615,13 @@ class DashboardProcessingService:
                 # SKU and are scored as unrelated.
                 competitor_offers=prepared,
             )
+            staged = _competitor_review_staging(
+                self.store, business, effective, run_id
+            )
+            if staged:
+                LOGGER.info(
+                    "Staged %s competitor relationships for review", staged
+                )
             runtime_components = _runtime_component_summary(
                 request, result
             )
