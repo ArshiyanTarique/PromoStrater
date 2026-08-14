@@ -60,7 +60,7 @@ def test_default_config_loads_with_repository_relative_paths() -> None:
     assert config.embedding.local_files_only is True
     assert config.embedding.text_construction_version == "2.0.0"
     assert config.agreement.require_same_top_candidate is True
-    assert config.agreement.lightgbm_auto_accept_threshold == 0.85
+    assert config.agreement.lightgbm_auto_accept_threshold == 0.95
     assert config.agreement.minimum_embedding_similarity is None
     assert config.agreement.minimum_embedding_margin is None
     assert config.agreement.disagreement_route is ReviewRoute.LLM_REVIEW

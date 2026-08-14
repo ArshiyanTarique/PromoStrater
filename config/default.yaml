@@ -143,7 +143,12 @@ embedding:
 
 agreement:
   require_same_top_candidate: true
-  lightgbm_auto_accept_threshold: 0.85
+  # PROVISIONAL business decision for the first production version. This is a
+  # MODEL SCORE cut-off, not a calibrated probability of correctness: no
+  # independent human-labelled set large enough to calibrate it exists yet
+  # (see docs and the threshold report). At or above it an own-brand match is
+  # accepted automatically; below it the match goes to review.
+  lightgbm_auto_accept_threshold: 0.95
   allow_embedding_auto_accept: false
   minimum_embedding_similarity: null
   minimum_embedding_margin: null

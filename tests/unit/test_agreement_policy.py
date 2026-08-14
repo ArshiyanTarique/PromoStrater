@@ -88,7 +88,7 @@ def _one(frame: pd.DataFrame, config=None):
 
 
 def test_safe_agreement_routes_to_review_when_auto_influence_unapproved() -> None:
-    result = _one(_candidates(probability=0.85))
+    result = _one(_candidates(probability=0.96))
     assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
     assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
     assert "EMBEDDING_AUTO_INFLUENCE_DISABLED" in result.routing_reason
@@ -97,14 +97,14 @@ def test_safe_agreement_routes_to_review_when_auto_influence_unapproved() -> Non
     assert result.embedding_top_candidate == "SKU-A"
     assert result.lightgbm_top_rank == 1
     assert result.embedding_rank == 1
-    assert result.lightgbm_score_margin == 0.55
+    assert result.lightgbm_score_margin == pytest.approx(0.66)
     assert result.embedding_score_margin == pytest.approx(0.30)
     assert result.candidate_generation_margin == 9.0
 
 
 def test_explicitly_approved_embedding_can_route_safe_agreement_to_auto() -> None:
     result = _one(
-        _candidates(probability=0.85),
+        _candidates(probability=0.96),
         replace(_config(), allow_embedding_auto_accept=True),
     )
     assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
