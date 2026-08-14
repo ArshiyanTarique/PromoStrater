@@ -121,26 +121,6 @@ ml:
   apply_safety_overrides: true
   continue_shadow_monitoring: true
 
-embedding:
-    enabled: false
-    backend: local_hashing
-    model_name: sku-hashing-384
-    model_version: sklearn-hashing-word-1-2-384-v2
-    batch_size: 64
-    device: cpu
-    similarity_metric: cosine
-    cache_embeddings: true
-    cache_path: ../data/processed/embedding_cache.sqlite3
-    max_sequence_length: 256
-    pooling_strategy: mean
-    normalize_vectors: true
-    local_files_only: true
-    text_construction_version: 2.0.0
-    commercial_parser_version: 1.0.0
-    retrieval_enabled: true
-    retrieval_top_k: 5
-    retrieval_offer_batch_size: 256
-
 agreement:
   require_same_top_candidate: true
   # PROVISIONAL business decision for the first production version. This is a
@@ -149,9 +129,6 @@ agreement:
   # (see docs and the threshold report). At or above it an own-brand match is
   # accepted automatically; below it the match goes to review.
   lightgbm_auto_accept_threshold: 0.95
-  allow_embedding_auto_accept: false
-  minimum_embedding_similarity: null
-  minimum_embedding_margin: null
   disagreement_route: llm_review
   weak_agreement_route: llm_review
   hard_conflict_route: manual_review

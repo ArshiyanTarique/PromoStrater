@@ -398,80 +398,11 @@ class MLDeploymentConfig:
 
 
 @dataclass(frozen=True)
-class EmbeddingConfig:
-    """Independent second-opinion embedding scorer configuration."""
-
-    enabled: bool
-    backend: str
-    model_name: str
-    model_version: str | None
-    batch_size: int
-    device: str
-    similarity_metric: str
-    cache_embeddings: bool
-    cache_path: Path
-    max_sequence_length: int = 256
-    pooling_strategy: str = "mean"
-    normalize_vectors: bool = True
-    local_files_only: bool = True
-    text_construction_version: str = "2.0.0"
-    commercial_parser_version: str = "1.0.0"
-    retrieval_enabled: bool = True
-    retrieval_top_k: int = 5
-    retrieval_offer_batch_size: int = 256
-
-    def __post_init__(self) -> None:
-        if not self.backend.strip():
-            raise ConfigurationError("embedding.backend must be non-empty")
-        if self.enabled and not self.model_name.strip():
-            raise ConfigurationError(
-                "Enabled embedding scoring requires embedding.model_name"
-            )
-        if self.batch_size < 1:
-            raise ConfigurationError(
-                "embedding.batch_size must be at least 1"
-            )
-        if not self.device.strip():
-            raise ConfigurationError("embedding.device must be non-empty")
-        if self.similarity_metric != "cosine":
-            raise ConfigurationError(
-                "Only embedding.similarity_metric=cosine is supported"
-            )
-        if self.max_sequence_length < 8:
-            raise ConfigurationError(
-                "embedding.max_sequence_length must be at least 8"
-            )
-        if self.pooling_strategy not in {"mean", "backend_default"}:
-            raise ConfigurationError(
-                "embedding.pooling_strategy must be mean or backend_default"
-            )
-        if not self.text_construction_version.strip():
-            raise ConfigurationError(
-                "embedding.text_construction_version must be non-empty"
-            )
-        if not self.commercial_parser_version.strip():
-            raise ConfigurationError(
-                "embedding.commercial_parser_version must be non-empty"
-            )
-        if self.retrieval_top_k < 1:
-            raise ConfigurationError(
-                "embedding.retrieval_top_k must be at least 1"
-            )
-        if self.retrieval_offer_batch_size < 1:
-            raise ConfigurationError(
-                "embedding.retrieval_offer_batch_size must be at least 1"
-            )
-
-
-@dataclass(frozen=True)
 class AgreementConfig:
     """Conservative candidate-ranker agreement and routing policy."""
 
     require_same_top_candidate: bool
     lightgbm_auto_accept_threshold: float
-    allow_embedding_auto_accept: bool
-    minimum_embedding_similarity: float | None
-    minimum_embedding_margin: float | None
     disagreement_route: ReviewRoute
     weak_agreement_route: ReviewRoute
     hard_conflict_route: ReviewRoute
@@ -480,20 +411,6 @@ class AgreementConfig:
         if not 0 <= self.lightgbm_auto_accept_threshold <= 1:
             raise ConfigurationError(
                 "agreement.lightgbm_auto_accept_threshold must be within [0, 1]"
-            )
-        if (
-            self.minimum_embedding_similarity is not None
-            and not -1 <= self.minimum_embedding_similarity <= 1
-        ):
-            raise ConfigurationError(
-                "agreement.minimum_embedding_similarity must be within [-1, 1]"
-            )
-        if (
-            self.minimum_embedding_margin is not None
-            and not 0 <= self.minimum_embedding_margin <= 2
-        ):
-            raise ConfigurationError(
-                "agreement.minimum_embedding_margin must be within [0, 2]"
             )
         if self.disagreement_route is ReviewRoute.AUTO_ACCEPT:
             raise ConfigurationError(
@@ -624,7 +541,6 @@ class PipelineConfig:
     training: TrainingPolicyConfig
     retraining: RetrainingConfig
     ml: MLDeploymentConfig
-    embedding: EmbeddingConfig
     agreement: AgreementConfig
     llm_review: LLMReviewConfig
     learning_store: LearningStoreConfig
@@ -735,9 +651,6 @@ def load_config(path: str | Path) -> PipelineConfig:
         raise ConfigurationError(
             "ml.mode must be one of: disabled, shadow, assisted"
         ) from error
-    embedding = raw.get("embedding", {})
-    if not isinstance(embedding, Mapping):
-        raise ConfigurationError("Invalid 'embedding' configuration section")
     agreement = raw.get("agreement", {})
     if not isinstance(agreement, Mapping):
         raise ConfigurationError("Invalid 'agreement' configuration section")
@@ -1066,79 +979,6 @@ def load_config(path: str | Path) -> PipelineConfig:
                 "ml.continue_shadow_monitoring",
             ),
         ),
-        embedding=EmbeddingConfig(
-            enabled=_as_bool(
-                embedding.get("enabled", False), "embedding.enabled"
-            ),
-            backend=str(
-                embedding.get(
-                    "backend", "local_sentence_transformer"
-                )
-            ).strip(),
-            model_name=str(
-                embedding.get(
-                    "model_name",
-                    "sentence-transformers/all-MiniLM-L6-v2",
-                )
-            ).strip(),
-            model_version=(
-                str(embedding["model_version"]).strip()
-                if embedding.get("model_version") is not None
-                and str(embedding["model_version"]).strip()
-                else None
-            ),
-            batch_size=_as_int(
-                embedding.get("batch_size", 64), "embedding.batch_size"
-            ),
-            device=str(embedding.get("device", "auto")).strip(),
-            similarity_metric=str(
-                embedding.get("similarity_metric", "cosine")
-            ).strip(),
-            cache_embeddings=_as_bool(
-                embedding.get("cache_embeddings", True),
-                "embedding.cache_embeddings",
-            ),
-            cache_path=_resolve_path(
-                embedding.get(
-                    "cache_path",
-                    "../data/processed/embedding_cache.sqlite3",
-                ),
-                base_dir,
-            ),
-            max_sequence_length=_as_int(
-                embedding.get("max_sequence_length", 256),
-                "embedding.max_sequence_length",
-            ),
-            pooling_strategy=str(
-                embedding.get("pooling_strategy", "mean")
-            ).strip(),
-            normalize_vectors=_as_bool(
-                embedding.get("normalize_vectors", True),
-                "embedding.normalize_vectors",
-            ),
-            local_files_only=_as_bool(
-                embedding.get("local_files_only", True),
-                "embedding.local_files_only",
-            ),
-            text_construction_version=str(
-                embedding.get("text_construction_version", "2.0.0")
-            ).strip(),
-            commercial_parser_version=str(
-                embedding.get("commercial_parser_version", "1.0.0")
-            ).strip(),
-            retrieval_enabled=_as_bool(
-                embedding.get("retrieval_enabled", True),
-                "embedding.retrieval_enabled",
-            ),
-            retrieval_top_k=_as_int(
-                embedding.get("retrieval_top_k", 5),
-                "embedding.retrieval_top_k",
-            ),
-            retrieval_offer_batch_size=_as_int(
-                embedding.get("retrieval_offer_batch_size", 256),
-                "embedding.retrieval_offer_batch_size",
-            ),
-        ),
         agreement=AgreementConfig(
             require_same_top_candidate=_as_bool(
                 agreement.get("require_same_top_candidate", True),
@@ -1147,18 +987,6 @@ def load_config(path: str | Path) -> PipelineConfig:
             lightgbm_auto_accept_threshold=_as_float(
                 agreement.get("lightgbm_auto_accept_threshold", 0.85),
                 "agreement.lightgbm_auto_accept_threshold",
-            ),
-            allow_embedding_auto_accept=_as_bool(
-                agreement.get("allow_embedding_auto_accept", False),
-                "agreement.allow_embedding_auto_accept",
-            ),
-            minimum_embedding_similarity=_optional_float(
-                agreement.get("minimum_embedding_similarity"),
-                "agreement.minimum_embedding_similarity",
-            ),
-            minimum_embedding_margin=_optional_float(
-                agreement.get("minimum_embedding_margin"),
-                "agreement.minimum_embedding_margin",
             ),
             disagreement_route=_review_route(
                 agreement.get("disagreement_route", "llm_review"),

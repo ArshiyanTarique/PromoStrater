@@ -1,4 +1,4 @@
-"""Conservative agreement policy over LightGBM and embedding rankings."""
+"""Own-brand decision policy over the LightGBM candidate ranking."""
 
 from __future__ import annotations
 
@@ -48,11 +48,6 @@ class AgreementResult:
     lightgbm_top_rank: int | None
     lightgbm_candidate_rank: int | None
     lightgbm_score_margin: float | None
-    embedding_top_candidate: str | None
-    embedding_similarity: float | None
-    embedding_rank: int | None
-    embedding_candidate_rank: int | None
-    embedding_score_margin: float | None
     same_top_candidate: bool
     candidate_generation_margin: float | None
     candidate_generation_raw_margin: float | None
@@ -73,11 +68,6 @@ class AgreementResult:
             "lightgbm_top_rank": self.lightgbm_top_rank,
             "lightgbm_candidate_rank": self.lightgbm_candidate_rank,
             "lightgbm_score_margin": self.lightgbm_score_margin,
-            "embedding_top_candidate": self.embedding_top_candidate,
-            "embedding_similarity": self.embedding_similarity,
-            "embedding_rank": self.embedding_rank,
-            "embedding_candidate_rank": self.embedding_candidate_rank,
-            "embedding_score_margin": self.embedding_score_margin,
             "same_top_candidate": self.same_top_candidate,
             "candidate_generation_margin": self.candidate_generation_margin,
             "candidate_generation_raw_margin": (
@@ -245,28 +235,16 @@ def _result(
     *,
     offer_id: str,
     lightgbm: _Ordered | None,
-    embedding: _Ordered | None,
     conflicts: Mapping[str, bool],
     status: AgreementStatus,
     route: ReviewRoute,
     reasons: list[AgreementReasonCode],
 ) -> AgreementResult:
     lightgbm_top = lightgbm.top if lightgbm is not None else None
-    embedding_top = embedding.top if embedding is not None else None
     lightgbm_itemcode = (
         str(lightgbm_top["master_itemcode"])
         if lightgbm_top is not None
         else None
-    )
-    embedding_itemcode = (
-        str(embedding_top["master_itemcode"])
-        if embedding_top is not None
-        else None
-    )
-    same = bool(
-        lightgbm_itemcode is not None
-        and embedding_itemcode is not None
-        and lightgbm_itemcode == embedding_itemcode
     )
     return AgreementResult(
         offer_id=offer_id,
@@ -281,18 +259,10 @@ def _result(
             else None
         ),
         lightgbm_score_margin=_score_margin(lightgbm),
-        embedding_top_candidate=embedding_itemcode,
-        embedding_similarity=(
-            embedding.top_score if embedding is not None else None
-        ),
-        embedding_rank=1 if embedding_top is not None else None,
-        embedding_candidate_rank=(
-            int(embedding_top["candidate_rank"])
-            if embedding_top is not None
-            else None
-        ),
-        embedding_score_margin=_score_margin(embedding),
-        same_top_candidate=same,
+        # One scorer decides, so there is no second top candidate to agree
+        # with. Retained as a column because downstream consumers read it; it
+        # is now constant rather than comparative.
+        same_top_candidate=False,
         candidate_generation_margin=(
             float(lightgbm_top["candidate_margin"])
             if lightgbm_top is not None
@@ -326,7 +296,6 @@ def _evaluate_offer(
         return _result(
             offer_id=offer_id,
             lightgbm=None,
-            embedding=None,
             conflicts=no_conflicts,
             status=AgreementStatus.MODEL_UNAVAILABLE,
             route=ReviewRoute.SAFE_FALLBACK,
@@ -377,7 +346,6 @@ def _evaluate_offer(
         return _result(
             offer_id=offer_id,
             lightgbm=lightgbm,
-            embedding=None,
             conflicts=conflicts,
             status=AgreementStatus.LIGHTGBM_ONLY,
             route=config.hard_conflict_route,
@@ -391,7 +359,6 @@ def _evaluate_offer(
         return _result(
             offer_id=offer_id,
             lightgbm=lightgbm,
-            embedding=None,
             conflicts=conflicts,
             status=AgreementStatus.LIGHTGBM_ONLY,
             route=config.weak_agreement_route,
@@ -400,7 +367,6 @@ def _evaluate_offer(
     return _result(
         offer_id=offer_id,
         lightgbm=lightgbm,
-        embedding=None,
         conflicts=conflicts,
         status=AgreementStatus.LIGHTGBM_ONLY,
         route=ReviewRoute.AUTO_ACCEPT,

@@ -53,13 +53,6 @@ def _config(tmp_path: Path):
             review_staging_directory=tmp_path / "reviews",
             challenge_set_directory=tmp_path / "challenge",
         ),
-        embedding=replace(
-            base.embedding,
-            backend="local_hashing",
-            model_name="sku-hashing-384",
-            model_version="sku-hashing-384-v1",
-            cache_path=tmp_path / "embedding.sqlite3",
-        ),
         llm_review=replace(
             base.llm_review,
             cache_path=tmp_path / "llm.sqlite3",

@@ -45,24 +45,8 @@ def test_default_config_loads_with_repository_relative_paths() -> None:
     assert config.ml.require_registered_model is True
     assert config.ml.apply_safety_overrides is True
     assert config.ml.continue_shadow_monitoring is True
-    assert config.embedding.enabled is False
-    assert config.embedding.backend == "local_hashing"
-    assert config.embedding.model_name == "sku-hashing-384"
-    assert config.embedding.model_version == (
-        "sklearn-hashing-word-1-2-384-v2"
-    )
-    assert config.embedding.batch_size == 64
-    assert config.embedding.device == "cpu"
-    assert config.embedding.similarity_metric == "cosine"
-    assert config.embedding.cache_embeddings is True
-    assert config.embedding.max_sequence_length == 256
-    assert config.embedding.normalize_vectors is True
-    assert config.embedding.local_files_only is True
-    assert config.embedding.text_construction_version == "2.0.0"
     assert config.agreement.require_same_top_candidate is True
     assert config.agreement.lightgbm_auto_accept_threshold == 0.95
-    assert config.agreement.minimum_embedding_similarity is None
-    assert config.agreement.minimum_embedding_margin is None
     assert config.agreement.disagreement_route is ReviewRoute.LLM_REVIEW
     assert config.agreement.weak_agreement_route is ReviewRoute.LLM_REVIEW
     assert config.agreement.hard_conflict_route is ReviewRoute.MANUAL_REVIEW

@@ -249,14 +249,6 @@ def test_llm_provider_failure_does_not_crash_or_modify_production(
     config = _enabled_config(tmp_path)
     config = replace(
         config,
-        embedding=replace(
-            config.embedding,
-            enabled=True,
-            backend="local_hashing",
-            model_name="isolation-hashing",
-            model_version="isolation-v1",
-            cache_path=tmp_path / "embedding-cache.sqlite3",
-        ),
         agreement=replace(
             config.agreement,
             lightgbm_auto_accept_threshold=1.0,

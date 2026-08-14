@@ -1047,11 +1047,6 @@ def run_unified_inference(
     if not own_mask.any():
         shadow_result = None
         shadow_manifest = {
-            "embedding_scoring": {
-                "status": "NOT_APPLICABLE",
-                "enabled": config.embedding.enabled,
-                "error": None,
-            },
             "stage_runtimes_seconds": {},
         }
         finalization_started = time.perf_counter()
@@ -1153,7 +1148,6 @@ def run_unified_inference(
             "run_id": effective_run_id,
             "mode": config.ml.mode.value,
             "model_id": config.ml.model_id,
-            "embedding_enabled": config.embedding.enabled,
             "llm_review_enabled": config.llm_review.enabled,
             "shadow_status": (
                 shadow_result.status
@@ -1321,7 +1315,6 @@ def run_unified_inference_non_blocking(
                 "run_id": effective_run_id,
                 "mode": config.ml.mode.value,
                 "model_id": config.ml.model_id,
-                "embedding_enabled": config.embedding.enabled,
                 "llm_review_enabled": config.llm_review.enabled,
                 "shadow_status": "FAILED_BEFORE_COMPLETION",
                 "production_application_enabled": (

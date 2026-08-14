@@ -30,9 +30,6 @@ dependencies = [
 test = [
     "pytest>=8",
 ]
-embedding = [
-    "sentence-transformers>=3,<6",
-]
 dashboard = [
     "streamlit>=1.40,<2",
     "xlrd>=2,<3",

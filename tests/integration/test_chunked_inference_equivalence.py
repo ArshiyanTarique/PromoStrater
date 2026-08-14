@@ -186,18 +186,12 @@ def _config(tmp_path, chunk_size: int, label: str):
         },
     )
     object.__setattr__(shadow, "chunk_size", chunk_size)
-    embedding = replace(
-        config.embedding,
-        backend="local_hashing",
-        cache_path=tmp_path / label / "embedding.sqlite3",
-    )
     llm_review = replace(
         config.llm_review, cache_path=tmp_path / label / "llm.sqlite3"
     )
     return replace(
         config,
         shadow_mode=shadow,
-        embedding=embedding,
         llm_review=llm_review,
     )
 

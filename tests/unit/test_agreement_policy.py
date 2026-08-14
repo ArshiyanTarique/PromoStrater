@@ -135,8 +135,9 @@ def test_ml_only_is_never_reported_as_agreement() -> None:
         AgreementStatus.WEAK_AGREEMENT,
     }
     assert result.same_top_candidate is False
-    assert result.embedding_top_candidate is None
-    assert result.embedding_similarity is None
+    # A one-scorer result exposes no second-scorer fields at all.
+    assert not hasattr(result, "embedding_top_candidate")
+    assert not hasattr(result, "embedding_similarity")
 
 
 def test_ml_only_high_confidence_auto_accepts() -> None:
@@ -215,12 +216,8 @@ def test_multiple_offers_produce_one_explicit_result_each() -> None:
         "lightgbm_top_candidate",
         "lightgbm_calibrated_probability",
         "lightgbm_top_rank",
-        "embedding_top_candidate",
-        "embedding_similarity",
-        "embedding_rank",
         "same_top_candidate",
         "lightgbm_score_margin",
-        "embedding_score_margin",
         "conflict_flags",
         "agreement_status",
         "routing_decision",
