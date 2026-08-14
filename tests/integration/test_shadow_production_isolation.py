@@ -239,48 +239,6 @@ def test_authoritative_integration_hook_runs_only_after_production_exports() -> 
     assert hook_position > source.index("file2.to_csv(FINAL_COMPETITOR_CSV")
 
 
-def test_embedding_backend_failure_does_not_fail_shadow_pipeline(
-    tmp_path, monkeypatch
-) -> None:
-    production, master = _frames()
-    before = production.copy(deep=True)
-    config = _enabled_config(tmp_path)
-    config = replace(
-        config,
-        embedding=replace(
-            config.embedding,
-            enabled=True,
-            backend="unavailable-test-backend",
-            model_name="missing-local-model",
-            model_version="missing-v1",
-            cache_path=tmp_path / "embedding-cache.sqlite3",
-        ),
-    )
-    monkeypatch.setattr(
-        shadow_pipeline,
-        "load_registered_shadow_package",
-        lambda **_: _registered(tmp_path),
-    )
-    assert config.embedding.enabled is True
-
-    result = run_shadow_observation(
-        production,
-        master,
-        config=config,
-        shadow_run_id="embedding-failure-isolation",
-    )
-
-    assert result.status == "COMPLETED_OBSERVATIONAL_ONLY"
-    predictions = pd.read_parquet(
-        result.output_paths["shadow_predictions_parquet"]
-    )
-    assert predictions["embedding_similarity"].isna().all()
-    assert predictions["embedding_failure_reason"].str.contains(
-        "Unknown embedding backend", regex=False
-    ).all()
-    assert not predictions["embedding_top_candidate"].any()
-    pd.testing.assert_frame_equal(production, before, check_exact=True)
-
 
 def test_llm_provider_failure_does_not_crash_or_modify_production(
     tmp_path, monkeypatch

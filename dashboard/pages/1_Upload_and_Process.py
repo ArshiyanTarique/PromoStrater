@@ -137,16 +137,7 @@ with st.container(border=True):
         status_label = "Assisted mode" if mode_value == "assisted" else "Shadow evaluation only"
         st.caption(f"Version: **{selected_model.model_version}** · Mode: {status_label}")
 
-    col_toggle1, col_toggle2 = st.columns(2)
-    with col_toggle1:
-        enable_embedding = st.toggle(
-            "Request local embeddings",
-            value=config.embedding.enabled,
-            disabled=is_running,
-            key="enable_embedding",
-            help="Records actual availability in run summary.",
-        )
-    with col_toggle2:
+    with st.columns(2)[0]:
         enable_llm = st.toggle(
             "Request local LLM review",
             value=config.llm_review.enabled,
@@ -204,7 +195,6 @@ if start_clicked and upload is not None:
                 deployment_mode=MLDeploymentMode(str(mode_value)),
                 model_id=model_id,
                 allow_duplicate=allow_duplicate,
-                enable_embedding=enable_embedding,
                 enable_llm_review=enable_llm,
             ),
             source_file_hash=identity.source_file_hash,

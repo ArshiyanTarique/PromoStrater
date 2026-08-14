@@ -20,7 +20,6 @@ from rapidfuzz import fuzz
 
 from sku_mapping.agreement.policy import evaluate_candidate_agreement
 from sku_mapping.config import (
-    EmbeddingConfig,
     PipelineConfig,
     ShadowModeConfig,
     load_config,
@@ -28,13 +27,6 @@ from sku_mapping.config import (
 from sku_mapping.constants import FEATURE_GENERATOR_VERSION, MODEL_FEATURE_COLUMNS
 from sku_mapping.data.offer_identity import canonical_offer_identity
 from sku_mapping.data.preprocessing import preprocess_product_master
-from sku_mapping.embedding.scorer import (
-    score_candidate_frame_non_blocking,
-)
-from sku_mapping.embedding.retrieval import (
-    EmbeddingRetrievalResult,
-    retrieve_embedding_candidates,
-)
 from sku_mapping.features.commercial_attributes import (
     attributes_json,
     compare_commercial_attributes,
@@ -196,42 +188,6 @@ def _production_accepted(value: object, tier: object) -> bool:
     return str(value) in {"AUTO_MATCH", "ACCEPTED"} or str(tier) == "high (ml)"
 
 
-def _retrieved_candidate(
-    offer: pd.Series,
-    master: pd.Series,
-    *,
-    rank: int,
-) -> CandidateMatch:
-    """Create diagnostics for an embedding-only union candidate."""
-    text_score = (
-        fuzz.token_sort_ratio(offer["match_text"], master["match_text"])
-        + fuzz.token_set_ratio(offer["match_text"], master["match_text"])
-    ) / 2.0
-    pack_status = pack_is_compatible(
-        offer["offer_measures"], master["master_measures"]
-    )
-    adjusted = text_score + (
-        4.0 if pack_status is True else -3.0 if pack_status is None else 0.0
-    )
-    return CandidateMatch(
-        itemcode=str(master["Itemcode"]),
-        itemname=str(master["Itemname"]),
-        text_score=round(float(text_score), 2),
-        adjusted_score=round(float(adjusted), 2),
-        margin=0.0,
-        raw_margin=0.0,
-        pack_status=pack_status,
-        pack_structure_status=pack_structure_agrees(
-            offer["offer_measures_detailed"],
-            master["master_measures_detailed"],
-        ),
-        category=str(offer["category"]),
-        candidate_rank=rank,
-        master_match_text=str(master["match_text"]),
-        master_measures=tuple(master["master_measures"]),
-    )
-
-
 @dataclass(frozen=True)
 class _MasterContext:
     """Master-side lookups and the candidate generator, built once per run.
@@ -304,14 +260,12 @@ def _build_candidate_features_for_slice(
     shadow_run_id: str,
     timestamp: str,
     registered: RegisteredShadowPackage,
-    embedding_config: EmbeddingConfig,
     progress: InferenceProgressCallback | None = None,
     progress_offset: int = 0,
     progress_total: int | None = None,
 ) -> tuple[
     pd.DataFrame,
     int,
-    EmbeddingRetrievalResult | None,
 ]:
     """Build candidate rows for one already-prepared slice of own-brand offers.
 
@@ -322,7 +276,7 @@ def _build_candidate_features_for_slice(
     the rows produced.
     """
     if own.empty:
-        return pd.DataFrame(), 0, None
+        return pd.DataFrame(), 0
 
     master = master_context.master
     master_lookup = master_context.master_lookup
@@ -352,36 +306,6 @@ def _build_candidate_features_for_slice(
             else None
         ),
     )
-    retrieval_result = retrieve_embedding_candidates(
-        own,
-        master,
-        config=embedding_config,
-    )
-    retrieval_similarity: dict[tuple[int, str], float] = {}
-    if retain_all_candidates:
-        for offer_position, hits in enumerate(retrieval_result.hits):
-            existing = {
-                candidate.itemcode for candidate in ranked[offer_position]
-            }
-            for hit in hits:
-                retrieval_similarity[
-                    (offer_position, hit.master_itemcode)
-                ] = hit.similarity
-                if hit.master_itemcode in existing:
-                    continue
-                master_row = master_lookup.get(hit.master_itemcode)
-                if master_row is None:
-                    continue
-                ranked[offer_position].append(
-                    _retrieved_candidate(
-                        own.iloc[offer_position],
-                        master_row,
-                        rank=len(ranked[offer_position]) + 1,
-                    )
-                )
-                existing.add(hit.master_itemcode)
-                if len(ranked[offer_position]) >= top_k * 2:
-                    break
     rows: list[dict[str, Any]] = []
     failures = 0
     feature_update_interval = max(1, len(ranked) // 100)
@@ -523,26 +447,7 @@ def _build_candidate_features_for_slice(
                         offer.get("Base Packsize", "")
                     ),
                     "candidate_rank": int(candidate.candidate_rank),
-                    "candidate_retrieval_source": (
-                        "FUZZY_AND_EMBEDDING"
-                        if candidate.candidate_rank <= top_k
-                        and (
-                            offer_position,
-                            candidate.itemcode,
-                        )
-                        in retrieval_similarity
-                        else (
-                            "FUZZY"
-                            if candidate.candidate_rank <= top_k
-                            else "EMBEDDING_EXPANSION"
-                        )
-                    ),
-                    "retrieval_embedding_similarity": (
-                        retrieval_similarity.get(
-                            (offer_position, candidate.itemcode),
-                            pd.NA,
-                        )
-                    ),
+                    "candidate_retrieval_source": "FUZZY",
                     "master_itemcode": candidate.itemcode,
                     "master_brand": str(
                         master_row.get("Brand Name", "Al Kabeer")
@@ -650,7 +555,7 @@ def _build_candidate_features_for_slice(
                 f"{progress_offset + completed_offers:,} of "
                 f"{reported_total:,} own-brand offers",
             )
-    return pd.DataFrame(rows), failures, retrieval_result
+    return pd.DataFrame(rows), failures
 
 
 def _build_candidate_features(
@@ -662,12 +567,10 @@ def _build_candidate_features(
     shadow_run_id: str,
     timestamp: str,
     registered: RegisteredShadowPackage,
-    embedding_config: EmbeddingConfig,
     progress: InferenceProgressCallback | None = None,
 ) -> tuple[
     pd.DataFrame,
     int,
-    EmbeddingRetrievalResult | None,
 ]:
     """Build every candidate row in one pass (the legacy, unchunked path)."""
     own = _prepare_own_offers(production_rows)
@@ -681,7 +584,6 @@ def _build_candidate_features(
         shadow_run_id=shadow_run_id,
         timestamp=timestamp,
         registered=registered,
-        embedding_config=embedding_config,
         progress=progress,
     )
 
@@ -762,18 +664,12 @@ def _merge_llm_results(results: list[Any]) -> Any:
 
 @dataclass
 class _ScoredChunk:
-    """One chunk after prediction, embedding, agreement, and LLM routing."""
+    """One chunk after prediction, agreement, and LLM routing."""
 
     frame: pd.DataFrame
     agreement_frame: pd.DataFrame
     llm_result: Any
-    embedding_result: Any
     stage_runtimes: dict[str, float]
-
-    @property
-    def embedding_status(self) -> str:
-        return str(self.embedding_result.status)
-
 
 def _plan_chunk_edges(
     own: pd.DataFrame, chunk_size: int
@@ -812,7 +708,7 @@ def _score_candidate_chunk(
     predictor: ShadowPredictor,
     config: PipelineConfig,
 ) -> _ScoredChunk:
-    """Apply prediction, embedding, agreement, and LLM routing to one frame.
+    """Apply prediction, agreement, and LLM routing to one frame.
 
     Lifted verbatim from the single-pass implementation so that the chunked and
     legacy paths run identical code. Every stage here is per-offer-group
@@ -852,59 +748,13 @@ def _score_candidate_chunk(
     stage_runtimes["lightgbm_scoring"] = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
-    embedding_result = score_candidate_frame_non_blocking(
-        candidate_frame,
-        config=config.embedding,
-    )
-    embedding_scores = embedding_result.scores
-    if embedding_scores.empty and len(candidate_frame):
-        embedding_scores = pd.DataFrame(
-            {
-                "embedding_status": embedding_result.status,
-                "embedding_model_id": (
-                    f"{config.embedding.backend}:"
-                    f"{config.embedding.model_name}"
-                ),
-                "embedding_model_version": (
-                    config.embedding.model_version or "NOT_LOADED"
-                ),
-                "offer_text_used": "",
-                "candidate_text_used": "",
-                "embedding_similarity": float("nan"),
-                "embedding_rank": pd.array(
-                    [pd.NA] * len(candidate_frame), dtype="Int64"
-                ),
-                "embedding_top_candidate": False,
-                "embedding_failure_reason": (
-                    "DISABLED_BY_CONFIGURATION"
-                    if embedding_result.status == "DISABLED"
-                    else embedding_result.error or "EMBEDDING_UNAVAILABLE"
-                ),
-            },
-            index=candidate_frame.index,
-        )
-    candidate_frame = pd.concat(
-        [
-            candidate_frame,
-            embedding_scores.reindex(candidate_frame.index),
-        ],
-        axis=1,
-    )
-    stage_runtimes["embedding_scoring"] = time.perf_counter() - stage_started
-
     stage_started = time.perf_counter()
     agreement_result = evaluate_candidate_agreement(
         candidate_frame,
         config=config.agreement,
     )
     agreement_candidate_columns = agreement_result.frame.rename(
-        columns={
-            "embedding_top_candidate": (
-                "agreement_embedding_top_candidate"
-            ),
-            "embedding_similarity": "agreement_embedding_similarity",
-            "embedding_rank": "agreement_embedding_rank",
-        }
+        columns={}
     )
     candidate_frame = candidate_frame.merge(
         agreement_candidate_columns,
@@ -965,43 +815,7 @@ def _score_candidate_chunk(
         frame=candidate_frame,
         agreement_frame=agreement_result.frame,
         llm_result=llm_review_result,
-        embedding_result=embedding_result,
         stage_runtimes=stage_runtimes,
-    )
-
-
-def _merge_embedding_results(results: list[Any]) -> Any:
-    """Combine per-chunk embedding results into one run-level view.
-
-    Backend identity, status, and device are properties of the configured
-    model and are therefore taken from the first chunk; only the per-run
-    tallies accumulate. With a single chunk this returns that chunk's result
-    unchanged, so the legacy path is unaffected.
-    """
-    if not results:
-        return None
-    if len(results) == 1:
-        return results[0]
-    first = results[0]
-    failed = next(
-        (item for item in results if str(item.status) != str(first.status)),
-        None,
-    )
-    return replace(
-        first,
-        status=failed.status if failed is not None else first.status,
-        error=(
-            failed.error
-            if failed is not None and failed.error
-            else first.error
-        ),
-        candidates_scored=sum(
-            int(item.candidates_scored or 0) for item in results
-        ),
-        failures=sum(int(item.failures or 0) for item in results),
-        runtime_seconds=sum(
-            float(item.runtime_seconds or 0.0) for item in results
-        ),
     )
 
 
@@ -1276,11 +1090,9 @@ def run_shadow_observation(
 
     master_context = _build_master_context(product_master.copy(deep=True))
     feature_failures = 0
-    embedding_retrieval_result: EmbeddingRetrievalResult | None = None
     agreement_frames: list[pd.DataFrame] = []
     llm_results: list[Any] = []
     llm_provider_calls = 0
-    embedding_results: list[Any] = []
     scored_frames: list[pd.DataFrame] = []
     total_own_offers = len(own_offers)
     total_candidate_rows = 0
@@ -1291,7 +1103,6 @@ def run_shadow_observation(
         (
             chunk_frame,
             chunk_failures,
-            chunk_retrieval,
         ) = _build_candidate_features_for_slice(
             chunk_offers,
             master_context,
@@ -1300,7 +1111,6 @@ def run_shadow_observation(
             shadow_run_id=effective_run_id,
             timestamp=timestamp,
             registered=registered,
-            embedding_config=config.embedding,
             progress=progress,
             progress_offset=start,
             progress_total=total_own_offers,
@@ -1310,8 +1120,6 @@ def run_shadow_observation(
             + (time.perf_counter() - stage_started)
         )
         feature_failures += chunk_failures
-        if embedding_retrieval_result is None:
-            embedding_retrieval_result = chunk_retrieval
         if chunk_frame.empty:
             del chunk_frame, chunk_offers
             continue
@@ -1338,7 +1146,6 @@ def run_shadow_observation(
         agreement_frames.append(scored.agreement_frame)
         llm_results.append(scored.llm_result)
         llm_provider_calls += int(scored.llm_result.provider_calls or 0)
-        embedding_results.append(scored.embedding_result)
         total_candidate_rows += len(scored.frame)
 
         # Progress is reported cumulatively: the dashboard tracker keeps the
@@ -1349,15 +1156,6 @@ def run_shadow_observation(
                 stop,
                 total_own_offers,
                 f"Scored {total_candidate_rows:,} candidate pairs",
-            )
-            progress(
-                "embedding",
-                stop,
-                total_own_offers,
-                (
-                    f"Embedding status: {scored.embedding_status}; "
-                    f"{total_candidate_rows:,} candidate pairs checked"
-                ),
             )
             progress(
                 "agreement",
@@ -1420,7 +1218,6 @@ def run_shadow_observation(
         else pd.concat(agreement_frames, ignore_index=True)
     )
     agreement_frames.clear()
-    embedding_result = _merge_embedding_results(embedding_results)
     llm_review_result = _merge_llm_results(llm_results)
     llm_results.clear()
     agreement_result = _AgreementTotals(frame=agreement_frame)
@@ -1544,95 +1341,6 @@ def run_shadow_observation(
         "prediction_rows": int(len(candidate_frame)),
         "offer_groups": int(candidate_frame["offer_group_id"].nunique()),
         "failed_shadow_predictions": int(feature_failures),
-        "embedding_scoring": {
-            "enabled": config.embedding.enabled,
-            "requested": embedding_result.requested,
-            "available": embedding_result.available,
-            "used": embedding_result.used,
-            "status": embedding_result.status,
-            "backend": config.embedding.backend,
-            "model_name": config.embedding.model_name,
-            "model_version": (
-                config.embedding.model_version or "UNRESOLVED"
-            ),
-            "device": embedding_result.device,
-            "vector_dimension": embedding_result.vector_dimension,
-            "cache_fingerprint": embedding_result.cache_fingerprint,
-            "candidates_scored": embedding_result.candidates_scored,
-            "failures": embedding_result.failures,
-            "runtime_seconds": embedding_result.runtime_seconds,
-            "cache_hits": embedding_result.cache_hits,
-            "cache_misses": embedding_result.cache_misses,
-            "error": embedding_result.error,
-            "used_for_production_decision": False,
-        },
-        "embedding_retrieval": {
-            "status": (
-                embedding_retrieval_result.status
-                if embedding_retrieval_result is not None
-                else "NOT_APPLICABLE"
-            ),
-            "requested": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.requested
-            ),
-            "available": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.available
-            ),
-            "used": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.used
-            ),
-            "offers_retrieved": (
-                embedding_retrieval_result.offers_retrieved
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "master_vectors": (
-                embedding_retrieval_result.master_vectors
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "runtime_seconds": (
-                embedding_retrieval_result.runtime_seconds
-                if embedding_retrieval_result is not None
-                else 0.0
-            ),
-            "cache_hits": (
-                embedding_retrieval_result.cache_hits
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "cache_misses": (
-                embedding_retrieval_result.cache_misses
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "error": (
-                embedding_retrieval_result.error
-                if embedding_retrieval_result is not None
-                else None
-            ),
-        },
-        "agreement_routing": {
-            "offers": len(agreement_result.frame),
-            "status_counts": {
-                str(key): int(value)
-                for key, value in agreement_result.frame[
-                    "agreement_status"
-                ].value_counts().items()
-            },
-            "route_counts": {
-                str(key): int(value)
-                for key, value in agreement_result.frame[
-                    "routing_decision"
-                ].value_counts().items()
-            },
-            "llm_called": bool(llm_review_result.provider_calls),
-            "learning_dataset_modified": False,
-            "routes_are_observational": True,
-        },
         "llm_review": {
             "enabled": config.llm_review.enabled,
             "status": llm_review_result.status,

@@ -133,7 +133,6 @@ class DashboardProcessRequest:
     deployment_mode: MLDeploymentMode
     model_id: str
     allow_duplicate: bool = False
-    enable_embedding: bool = False
     enable_llm_review: bool = False
 
 
@@ -229,27 +228,6 @@ def _runtime_component_summary(
     model_ok = completed and not int(
         result.statistics.get("model_error_count", 0) or 0
     )
-    embedding_observed = str(
-        result.statistics.get("embedding_status") or ""
-    ).upper()
-    embedding_requested = bool(
-        result.statistics.get("embedding_requested", False)
-    )
-    embedding_available = bool(
-        result.statistics.get("embedding_available", False)
-    )
-    embedding_used = bool(
-        result.statistics.get("embedding_used", False)
-    )
-    if not request.enable_embedding or not embedding_requested:
-        embedding_status = "DISABLED"
-    elif embedding_available and embedding_used:
-        embedding_status = "ACTIVE"
-    elif embedding_observed == "UNAVAILABLE":
-        embedding_status = "UNAVAILABLE"
-    else:
-        embedding_status = "NOT_EXERCISED"
-
     llm_calls = int(result.statistics.get("llm_calls", 0) or 0)
     llm_status = (
         "ACTIVE"
@@ -260,7 +238,6 @@ def _runtime_component_summary(
         "candidate_generation": "ACTIVE" if completed else "FAILED",
         "feature_generation": "ACTIVE" if completed else "FAILED",
         "lightgbm": "ACTIVE" if model_ok else "FAILED",
-        "embedding": embedding_status,
         "llm": llm_status,
         "competitor_discovery": "ACTIVE",
     }
@@ -439,10 +416,6 @@ class DashboardProcessingService:
                         self.config.dashboard.output_directory
                         / "_shadow"
                     ),
-                ),
-                embedding=replace(
-                    self.config.embedding,
-                    enabled=request.enable_embedding,
                 ),
                 llm_review=replace(
                     self.config.llm_review,
