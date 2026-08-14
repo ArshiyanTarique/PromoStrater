@@ -303,6 +303,30 @@ MIGRATIONS: dict[int, str] = {
         CREATE INDEX idx_competitor_decisions_run
             ON competitor_decisions(run_id);
     """,
+    # NOT YET ACTIVE. CURRENT_SCHEMA_VERSION is still 8, so migrate()
+    # never reaches this. Bump it to 9 ONLY after store.py, observer.py
+    # and review_selection.py stop reading and writing these columns -
+    # dropping them first breaks every write. Dry-run on a full copy of
+    # the production database passed: all 10 tables identical, columns
+    # gone, quick_check ok, 37s.
+    9: """
+        -- Embeddings are no longer part of the architecture. The scorer, its
+        -- package, its configuration and its dependency are gone; these four
+        -- columns were the last place the removed component still existed.
+        --
+        -- They are dropped rather than left null-filled because a column that
+        -- can only ever be NULL invites a reader to believe the value means
+        -- something. Everything they held is preserved in a verified backup
+        -- taken outside the repository before this migration ran.
+        --
+        -- DROP COLUMN rewrites each table in place; no other column, row, or
+        -- index is touched.
+        ALTER TABLE offer_decisions DROP COLUMN embedding_similarity;
+        ALTER TABLE offer_decisions DROP COLUMN embedding_status;
+        ALTER TABLE offer_decisions DROP COLUMN embedding_failure_reason;
+        ALTER TABLE predictions DROP COLUMN embedding_similarity;
+        ALTER TABLE pipeline_runs DROP COLUMN embedding_model_id;
+    """,
 }
 
 
