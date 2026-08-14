@@ -87,54 +87,26 @@ def _one(frame: pd.DataFrame, config=None):
     ).results[0]
 
 
-def test_safe_agreement_routes_to_review_when_auto_influence_unapproved() -> None:
-    result = _one(_candidates(probability=0.96))
-    assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
-    assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
-    assert "EMBEDDING_AUTO_INFLUENCE_DISABLED" in result.routing_reason
-    assert result.same_top_candidate is True
-    assert result.lightgbm_top_candidate == "SKU-A"
-    assert result.embedding_top_candidate == "SKU-A"
-    assert result.lightgbm_top_rank == 1
-    assert result.embedding_rank == 1
-    assert result.lightgbm_score_margin == pytest.approx(0.66)
-    assert result.embedding_score_margin == pytest.approx(0.30)
-    assert result.candidate_generation_margin == 9.0
-
-
-def test_explicitly_approved_embedding_can_route_safe_agreement_to_auto() -> None:
-    result = _one(
-        _candidates(probability=0.96),
-        replace(_config(), allow_embedding_auto_accept=True),
-    )
-    assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
-    assert result.routing_decision is ReviewRoute.AUTO_ACCEPT
 
 
 def test_exact_commercial_candidate_precedes_higher_scoring_adapted() -> None:
+    """Commercial preference still outranks raw score, with one scorer."""
     frame = _candidates(probability=0.99)
     frame.loc[0, "commercial_outcome"] = "ADAPTED_MATCH"
     frame.loc[1, "commercial_outcome"] = "EXACT_MATCH"
     frame.loc[1, "calibrated_probability"] = 0.80
-    frame.loc[0, "embedding_similarity"] = 0.99
-    frame.loc[1, "embedding_similarity"] = 0.50
     result = _one(frame)
     assert result.lightgbm_top_candidate == "SKU-B"
-    assert result.embedding_top_candidate == "SKU-B"
+    # 0.80 is below the configured bar, so the exact candidate is reviewed
+    # rather than accepted - preference decides WHICH candidate, the threshold
+    # decides whether it is accepted.
     assert result.routing_decision is ReviewRoute.LLM_REVIEW
 
 
-def test_different_top_candidates_route_to_llm_review() -> None:
-    result = _one(_candidates(same_top=False))
-    assert result.agreement_status is AgreementStatus.DISAGREEMENT
-    assert result.routing_decision is ReviewRoute.LLM_REVIEW
-    assert result.same_top_candidate is False
-    assert "DIFFERENT_TOP_CANDIDATE" in result.routing_reason
 
-
-def test_same_top_below_lightgbm_threshold_routes_to_llm_review() -> None:
+def test_below_lightgbm_threshold_routes_to_llm_review() -> None:
     result = _one(_candidates(probability=0.849999))
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.LLM_REVIEW
     assert "LIGHTGBM_BELOW_THRESHOLD" in result.routing_reason
 
@@ -143,7 +115,7 @@ def test_hard_conflict_routes_to_manual_review_even_with_high_scores() -> None:
     result = _one(
         _candidates(probability=0.99, hard_conflict=True)
     )
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
     assert result.conflict_flags["protein_conflict"] is True
     assert "HARD_CONFLICT" in result.routing_reason
@@ -216,18 +188,11 @@ def test_lightgbm_unavailable_routes_to_safe_fallback() -> None:
 
 def test_missing_master_routes_to_manual_review() -> None:
     result = _one(_candidates(missing_master=True))
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
     assert result.conflict_flags["missing_master"] is True
     assert "MASTER_SKU_MISSING" in result.routing_reason
 
-
-def test_optional_embedding_margin_is_not_invented_but_is_enforced_if_set() -> None:
-    config = replace(_config(), minimum_embedding_margin=0.40)
-    result = _one(_candidates(), config=config)
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
-    assert result.routing_decision is ReviewRoute.LLM_REVIEW
-    assert "WEAK_EMBEDDING_MARGIN" in result.routing_reason
 
 
 def test_multiple_offers_produce_one_explicit_result_each() -> None:

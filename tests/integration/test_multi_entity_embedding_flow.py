@@ -174,8 +174,16 @@ def test_each_entity_has_independent_embedding_model_decision_and_export(
         "CHICKEN-400",
         "BEEF-400",
     ]
-    assert decisions["matched_master_sku"].eq("").all()
-    assert decisions["final_decision"].eq("MANUAL_REVIEW").all()
+    # 0.96 clears the configured auto-accept bar, so each entity resolves to
+    # its own master SKU. Under the previous two-scorer policy the same score
+    # was forced to MANUAL_REVIEW because a second scorer could not corroborate
+    # it - the multi-entity behaviour this test exists for is unchanged; only
+    # the decision the score earns has changed.
+    assert decisions["matched_master_sku"].tolist() == [
+        "CHICKEN-400",
+        "BEEF-400",
+    ]
+    assert decisions["final_decision"].eq("AUTO_ACCEPT").all()
     assert decisions["lightgbm_probability"].eq(0.96).all()
     assert decisions["entity_id"].is_unique
     assert decisions["source_offer_id"].eq("source-1").all()
