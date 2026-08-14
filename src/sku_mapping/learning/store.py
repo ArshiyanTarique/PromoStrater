@@ -695,7 +695,6 @@ class LearningStore:
                            p.entity_parse_confidence,
                            p.candidate_description,
                            p.lightgbm_probability,
-                           p.embedding_similarity,
                            p.agreement_status,
                            p.decision_source,
                            p.conflict_flags_json
@@ -790,7 +789,6 @@ class LearningStore:
             ),
             "status": str(values.get("status") or "STARTED"),
             "model_id": values.get("model_id"),
-            "embedding_model_id": values.get("embedding_model_id"),
             "llm_model_id": values.get("llm_model_id"),
             "threshold": _clean_float(values.get("threshold")),
             "output_paths_json": _canonical_json(
@@ -815,7 +813,7 @@ class LearningStore:
                             run_id, started_at, completed_at, source_filename,
                             source_file_hash, source_row_count,
                             unique_offer_count, deployment_mode, status,
-                            model_id, embedding_model_id, llm_model_id,
+                            model_id, llm_model_id,
                             threshold, output_paths_json,
                             stage_runtimes_json, run_metadata_json,
                             error_summary, created_at
@@ -824,7 +822,7 @@ class LearningStore:
                             :source_filename, :source_file_hash,
                             :source_row_count, :unique_offer_count,
                             :deployment_mode, :status, :model_id,
-                            :embedding_model_id, :llm_model_id, :threshold,
+                            :llm_model_id, :threshold,
                             :output_paths_json, :stage_runtimes_json,
                             :run_metadata_json, :error_summary, :created_at
                         )
@@ -854,7 +852,6 @@ class LearningStore:
                                 excluded.model_id,
                                 pipeline_runs.model_id
                             ),
-                            embedding_model_id=excluded.embedding_model_id,
                             llm_model_id=excluded.llm_model_id,
                             threshold=COALESCE(
                                 excluded.threshold,
@@ -1040,13 +1037,6 @@ class LearningStore:
                     "lightgbm_probability": _clean_float(
                         raw.get("lightgbm_probability")
                     ),
-                    "embedding_similarity": _clean_float(
-                        raw.get("embedding_similarity")
-                    ),
-                    "embedding_status": raw.get("embedding_status"),
-                    "embedding_failure_reason": raw.get(
-                        "embedding_failure_reason"
-                    ),
                     "created_at": str(raw.get("created_at") or now),
                 }
             )
@@ -1066,8 +1056,7 @@ class LearningStore:
                             proposed_candidate_rank, matched_master_sku,
                             final_decision, decision_source,
                             final_decision_reason, final_eligible_mapping,
-                            lightgbm_probability, embedding_similarity,
-                            embedding_status, embedding_failure_reason,
+                            lightgbm_probability,
                             created_at
                         ) VALUES (
                             :run_id, :offer_id, :offer_description,
@@ -1078,8 +1067,7 @@ class LearningStore:
                             :final_decision, :decision_source,
                             :final_decision_reason,
                             :final_eligible_mapping,
-                            :lightgbm_probability, :embedding_similarity,
-                            :embedding_status, :embedding_failure_reason,
+                            :lightgbm_probability,
                             :created_at
                         )
                         ON CONFLICT(run_id, offer_id) DO NOTHING
@@ -1150,9 +1138,6 @@ class LearningStore:
                     "lightgbm_probability": _clean_float(
                         raw.get("lightgbm_probability")
                     ),
-                    "embedding_similarity": _clean_float(
-                        raw.get("embedding_similarity")
-                    ),
                     "agreement_status": raw.get("agreement_status"),
                     "llm_decision": raw.get("llm_decision"),
                     "llm_confidence": _clean_float(
@@ -1191,7 +1176,7 @@ class LearningStore:
                             attribute_inheritance_flags,
                             entity_parse_confidence, candidate_id,
                             candidate_description, candidate_rank,
-                            lightgbm_probability, embedding_similarity,
+                            lightgbm_probability,
                             agreement_status, llm_decision, llm_confidence,
                             final_decision, decision_source,
                             conflict_flags_json, feature_snapshot_json,
@@ -1204,7 +1189,7 @@ class LearningStore:
                             :attribute_inheritance_flags,
                             :entity_parse_confidence, :candidate_id,
                             :candidate_description, :candidate_rank,
-                            :lightgbm_probability, :embedding_similarity,
+                            :lightgbm_probability,
                             :agreement_status, :llm_decision, :llm_confidence,
                             :final_decision, :decision_source,
                             :conflict_flags_json, :feature_snapshot_json,
@@ -1464,7 +1449,7 @@ class LearningStore:
         rows = connection.execute(
             """
             SELECT candidate_id, candidate_description, candidate_rank,
-                   lightgbm_probability, embedding_similarity,
+                   lightgbm_probability,
                    conflict_flags_json
             FROM predictions
             WHERE run_id = ? AND offer_id = ?

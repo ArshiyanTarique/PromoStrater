@@ -346,30 +346,9 @@ class ModelInsightsService:
                         }
                     )
 
-        embedding_status = str(
-            statistics.get("embedding_status") or "NOT_RECORDED"
-        ).upper()
         llm_calls = int(statistics.get("llm_calls", 0) or 0)
         runtime_components = pd.DataFrame(
             [
-                {
-                    "Component": "Local embeddings",
-                    "Requested": (
-                        "Yes"
-                        if statistics.get("embedding_enabled")
-                        else "No"
-                    ),
-                    "Available": (
-                        "Yes"
-                        if statistics.get("embedding_available")
-                        else "No"
-                    ),
-                    "Used in latest run": (
-                        "Yes"
-                        if statistics.get("embedding_used")
-                        else "No"
-                    ),
-                },
                 {
                     "Component": "Local LLM reviewer",
                     "Requested": (

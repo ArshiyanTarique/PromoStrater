@@ -203,10 +203,6 @@ def _base_record(
         "final_decision_reason": "",
         "final_eligible_mapping": False,
         "lightgbm_probability": None,
-        "embedding_similarity": None,
-        "embedding_status": "",
-        "embedding_failure_reason": "",
-        "lightgbm_embedding_agreement": False,
         "agreement_status": "",
         "agreement_route": "",
         "llm_decision": "",
@@ -216,7 +212,6 @@ def _base_record(
         )
         or "UNREVIEWED",
         "model_id": model_id,
-        "embedding_model_id": "",
         "llm_model_id": "",
         "run_id": run_id,
         "hard_conflict": False,
@@ -429,18 +424,6 @@ def finalize_unified_decisions(
                 "lightgbm_probability": _safe_float(
                     selected.get("calibrated_probability")
                 ),
-                "embedding_similarity": _safe_float(
-                    selected.get("embedding_similarity")
-                ),
-                "embedding_status": _safe_text(
-                    selected.get("embedding_status")
-                ),
-                "embedding_failure_reason": _safe_text(
-                    selected.get("embedding_failure_reason")
-                ),
-                "lightgbm_embedding_agreement": _safe_bool(
-                    top.get("same_top_candidate", False)
-                ),
                 "agreement_status": agreement_status,
                 "agreement_route": agreement_route,
                 "mapping_outcome": _safe_text(
@@ -463,9 +446,6 @@ def finalize_unified_decisions(
                 ),
                 "llm_confidence": _safe_float(
                     top.get("llm_confidence")
-                ),
-                "embedding_model_id": _safe_text(
-                    selected.get("embedding_model_id")
                 ),
                 "llm_model_id": _safe_text(
                     top.get("llm_model_id")
@@ -607,15 +587,6 @@ def finalize_unified_decisions(
                 "final_eligible_mapping": eligible,
                 "lightgbm_probability": _safe_float(
                     selected.get("calibrated_probability")
-                ),
-                "embedding_similarity": _safe_float(
-                    selected.get("embedding_similarity")
-                ),
-                "embedding_status": _safe_text(
-                    selected.get("embedding_status")
-                ),
-                "embedding_failure_reason": _safe_text(
-                    selected.get("embedding_failure_reason")
                 ),
             }
         )
@@ -889,44 +860,6 @@ def _statistics(
         ),
         "competitor_offer_count": int(
             counts.get(FinalMatchDecision.COMPETITOR_OFFER.value, 0)
-        ),
-        "embedding_status": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("status", "NOT_APPLICABLE"),
-        "embedding_requested": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "requested", False
-            )
-        ),
-        "embedding_available": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "available", False
-            )
-        ),
-        "embedding_used": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "used", False
-            )
-        ),
-        "embedding_device": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("device", ""),
-        "embedding_vector_dimension": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("vector_dimension"),
-        "embedding_failure_reason": (
-            shadow_manifest.get("embedding_scoring", {}).get("error")
-            or (
-                "DISABLED_BY_CONFIGURATION"
-                if shadow_manifest.get("embedding_scoring", {}).get(
-                    "status"
-                )
-                == "DISABLED"
-                else ""
-            )
-        ),
-        "lightgbm_embedding_agreement_rate": (
-            float(same_top.mean()) if len(same_top) else None
         ),
         "llm_calls": int(
             shadow_manifest.get("llm_review", {}).get(

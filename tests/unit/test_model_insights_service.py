@@ -87,8 +87,6 @@ def test_requested_available_and_used_runtime_states_stay_distinct(
     statistics.write_text(
         json.dumps(
             {
-                "embedding_enabled": True,
-                "embedding_status": "UNAVAILABLE",
                 "llm_review_enabled": True,
                 "llm_calls": 0,
             }
@@ -98,7 +96,6 @@ def test_requested_available_and_used_runtime_states_stay_distinct(
     monitoring.write_text(
         json.dumps(
             {
-                "embedding_scoring": {"candidate_rows": 0},
                 "calibrated_probability_distribution": [],
             }
         ),
@@ -121,11 +118,6 @@ def test_requested_available_and_used_runtime_states_stay_distinct(
         config, store, registry
     ).build(selected.model_id).runtime_components.set_index("Component")
 
-    assert runtime.loc["Local embeddings", "Requested"] == "Yes"
-    assert runtime.loc["Local embeddings", "Available"] == "No"
-    assert runtime.loc[
-        "Local embeddings", "Used in latest run"
-    ] == "No"
     assert runtime.loc["Local LLM reviewer", "Requested"] == "Yes"
     assert runtime.loc[
         "Local LLM reviewer", "Available"

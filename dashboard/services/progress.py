@@ -53,7 +53,6 @@ INFERENCE_PHASE_RANGES = {
     "candidate_generation": (60, 200),
     "feature_generation": (200, 500),
     "lightgbm": (500, 800),
-    "embedding": (800, 850),
     "agreement": (850, 920),
     "llm_review": (920, 960),
     "final_decisions": (960, 1000),

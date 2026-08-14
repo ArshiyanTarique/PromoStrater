@@ -95,7 +95,6 @@ class DashboardRunService:
             "unique_offers": run["unique_offer_count"],
             "deployment_mode": run["deployment_mode"],
             "model_id": run["model_id"],
-            "embedding_model_id": run["embedding_model_id"],
             "llm_model_id": run["llm_model_id"],
             "threshold": run["threshold"],
             "runtime": sum(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -303,12 +303,9 @@ MIGRATIONS: dict[int, str] = {
         CREATE INDEX idx_competitor_decisions_run
             ON competitor_decisions(run_id);
     """,
-    # NOT YET ACTIVE. CURRENT_SCHEMA_VERSION is still 8, so migrate()
-    # never reaches this. Bump it to 9 ONLY after store.py, observer.py
-    # and review_selection.py stop reading and writing these columns -
-    # dropping them first breaks every write. Dry-run on a full copy of
-    # the production database passed: all 10 tables identical, columns
-    # gone, quick_check ok, 37s.
+    # Activated once store.py, observer.py and review_selection.py stopped
+    # naming these columns. Dry-run on a full copy of the production database
+    # passed first: all 10 tables identical, columns gone, quick_check ok.
     9: """
         -- Embeddings are no longer part of the architecture. The scorer, its
         -- package, its configuration and its dependency are gone; these four
