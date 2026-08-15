@@ -63,7 +63,7 @@ def _category_specs(
             ),
         ),
         (
-            "LIGHTGBM_EMBEDDING_DISAGREEMENT",
+            "LIGHTGBM_DISAGREEMENT",
             lambda row: (
                 str(row.get("agreement_status", "")).upper()
                 == "DISAGREEMENT"

@@ -515,8 +515,8 @@ def finalize_unified_decisions(
 
         if agreement_route == "AUTO_ACCEPT":
             decision = FinalMatchDecision.AUTO_ACCEPT
-            decision_source = "LIGHTGBM_EMBEDDING_AGREEMENT"
-            decision_reason = "SAFE_AGREEMENT_POLICY"
+            decision_source = "LIGHTGBM_THRESHOLD"
+            decision_reason = "ABOVE_AUTO_ACCEPT_THRESHOLD"
         elif agreement_route == "LLM_REVIEW":
             llm_route = _safe_text(top.get("llm_final_route"))
             if llm_route == "LLM_ACCEPT":
@@ -547,11 +547,7 @@ def finalize_unified_decisions(
                 decision_reason = _manual_reason(top)
         else:
             decision = FinalMatchDecision.MANUAL_REVIEW
-            decision_source = (
-                "EMBEDDING_FAILURE_SAFE_POLICY"
-                if agreement_status == "EMBEDDING_UNAVAILABLE"
-                else "AGREEMENT_POLICY"
-            )
+            decision_source = "AGREEMENT_POLICY"
             decision_reason = _manual_reason(top)
 
         selected_itemcode = _safe_text(

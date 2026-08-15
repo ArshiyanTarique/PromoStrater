@@ -17,12 +17,6 @@ KNOWN_ENUM_LABELS: dict[str, str] = {
     "SHADOW_MODE_ONLY": "Shadow Evaluation Only",
     "NOT_APPROVED_FOR_AUTOMATIC_MATCHING": "Not Approved For Auto Match",
     
-    # Embedding Statuses & Fallbacks
-    "EMBEDDING_FAILURE_SAFE_FALLBACK": "Embedding Fallback",
-    "EMBEDDING_UNAVAILABLE": "Embedding Unavailable",
-    "EMBEDDING_DISABLED": "Embedding Disabled",
-    "EMBEDDING_LOAD_FAILED": "Embedding Load Failed",
-    "EMBEDDING_RUNTIME_FAILED": "Embedding Runtime Failed",
     "NOT_EXERCISED": "Not Exercised",
     "ACTIVE": "Active / Used",
     "USED": "Used in Run",
@@ -79,7 +73,6 @@ STATUS_COLOR_MAP: dict[str, str] = {
     "MANUAL_REVIEW": "warning",
     "SHADOW_MODE_ONLY": "warning",
     "NOT_APPROVED_FOR_AUTOMATIC_MATCHING": "warning",
-    "EMBEDDING_FAILURE_SAFE_FALLBACK": "warning",
     "NOT_EXERCISED": "warning",
     "PROCESSING": "info",
     "VALIDATING": "info",
@@ -88,9 +81,6 @@ STATUS_COLOR_MAP: dict[str, str] = {
     "MODEL_ERROR": "error",
     "FAILED": "error",
     "FAILED_DASHBOARD": "error",
-    "EMBEDDING_UNAVAILABLE": "error",
-    "EMBEDDING_LOAD_FAILED": "error",
-    "EMBEDDING_RUNTIME_FAILED": "error",
     "DISABLED": "neutral",
     "IDLE": "neutral",
     "UNAVAILABLE": "error",
@@ -116,20 +106,6 @@ def get_status_color(value: str | None) -> str:
         return "neutral"
     clean = str(value).strip()
     return STATUS_COLOR_MAP.get(clean, "neutral")
-
-
-def format_embedding_status(status: str | None, failure_reason: str | None = None) -> tuple[str, str]:
-    """Return readable label and color category for embedding status."""
-    if not status:
-        return "Disabled", "neutral"
-    
-    clean = str(status).upper()
-    label = format_enum_label(clean)
-    if failure_reason:
-        label += f" ({failure_reason})"
-        
-    color = get_status_color(clean)
-    return label, color
 
 
 def format_elapsed(seconds: float) -> str:
