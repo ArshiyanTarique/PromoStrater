@@ -53,6 +53,36 @@ competitors:
   # measures precision at the top, not recall.
   review_staging_per_target: 0
 
+  # --- Automatic competitor decisions -------------------------------------
+  # Every competitor relationship ends as ACCEPTED or REJECTED with no human
+  # in the loop. The rules gate first, the ranker orders what survives, the
+  # thresholds below settle the clear cases, and the LLM settles the rest.
+  # Anything still unresolved - an LLM refusal, timeout, malformed reply, or
+  # invented SKU - REJECTS. Off by default so rules-only stays reachable.
+  automatic_decisions_enabled: false
+  # PROVISIONAL THRESHOLDS - measured, not validated.
+  # Taken from an 8,000-row real slice: 2,683 supported relationships over
+  # 1,302 competitor offers, 99.1% of them scored by the model.
+  #   rank-1 raw margin  p25 -4.99  p50 -1.90  p75 +2.05  p90 +5.11
+  #   rank1-rank2 gap    p25  0.00  p50  2.12  p75  5.35  p90  9.48
+  # A quarter of offers have a gap of exactly 0.00 - the model cannot separate
+  # its first two choices at all - and those are the ones the LLM exists for.
+  # These are NOT related to agreement.lightgbm_auto_accept_threshold: this is
+  # an uncalibrated within-shortlist margin, that is a calibrated probability
+  # for a different question. Never copy one into the other.
+  # No human competitor labels exist yet, so these are unvalidated. Revisit
+  # them once review_staging_per_target has collected ground truth.
+  clear_margin_threshold: 0.0
+  clear_gap_threshold: 2.0
+  # Ask the configured LLM provider about ambiguous offers. Off means every
+  # ambiguous offer rejects. Requires llm_review.provider to be configured and
+  # its API key present in the environment.
+  llm_adjudication_enabled: false
+  # Ceiling on candidates per adjudication call. The full candidate universe
+  # is never sent - only this many, best-ranked first.
+  llm_max_candidates: 5
+  llm_timeout_seconds: 60.0
+
 runtime:
   random_seed: 42
   log_level: INFO

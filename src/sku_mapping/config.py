@@ -102,6 +102,26 @@ class CompetitorConfig:
     #: start accumulating the competitor ground truth that neither the rules
     #: nor the borrowed model have ever been measured against.
     review_staging_per_target: int = 0
+    #: Decide every competitor relationship automatically: the rules and the
+    #: ranker settle the clear cases, the adjudicator settles the rest, and
+    #: anything unresolved rejects. Off by default so the rules-only behaviour
+    #: stays reachable by configuration alone.
+    automatic_decisions_enabled: bool = False
+    #: PROVISIONAL. Raw-margin floor the top candidate must clear. This is an
+    #: uncalibrated within-shortlist margin, NOT a probability, and it is
+    #: unrelated to agreement.lightgbm_auto_accept_threshold - that number
+    #: answers a different question about a different population.
+    clear_margin_threshold: float = 0.0
+    #: PROVISIONAL. Margin the top candidate must lead the runner-up by. The
+    #: shipped 2.0 is the median measured gap; a quarter of offers measure 0.0,
+    #: and those are exactly the ones worth adjudicating.
+    clear_gap_threshold: float = 2.0
+    #: Send ambiguous offers to the configured LLM provider. Off means every
+    #: ambiguous offer rejects instead.
+    llm_adjudication_enabled: bool = False
+    #: Hard ceiling on candidates sent in one adjudication call.
+    llm_max_candidates: int = 5
+    llm_timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.max_per_target < 0:
@@ -118,6 +138,20 @@ class CompetitorConfig:
             raise ConfigurationError(
                 "competitors.review_staging_per_target must be 0 (stage "
                 "nothing) or a positive integer"
+            )
+        if self.llm_max_candidates < 1:
+            raise ConfigurationError(
+                "competitors.llm_max_candidates must be at least 1; the "
+                "adjudicator cannot choose from an empty shortlist"
+            )
+        if self.llm_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "competitors.llm_timeout_seconds must be greater than 0"
+            )
+        if self.clear_gap_threshold < 0:
+            raise ConfigurationError(
+                "competitors.clear_gap_threshold must be 0 or greater; a "
+                "negative gap would accept a candidate the model ranked second"
             )
 
     @property
@@ -728,6 +762,28 @@ def load_config(path: str | Path) -> PipelineConfig:
             review_staging_per_target=_as_int(
                 competitors.get("review_staging_per_target", 0),
                 "competitors.review_staging_per_target",
+            ),
+            automatic_decisions_enabled=bool(
+                competitors.get("automatic_decisions_enabled", False)
+            ),
+            clear_margin_threshold=_as_float(
+                competitors.get("clear_margin_threshold", 0.0),
+                "competitors.clear_margin_threshold",
+            ),
+            clear_gap_threshold=_as_float(
+                competitors.get("clear_gap_threshold", 2.0),
+                "competitors.clear_gap_threshold",
+            ),
+            llm_adjudication_enabled=bool(
+                competitors.get("llm_adjudication_enabled", False)
+            ),
+            llm_max_candidates=_as_int(
+                competitors.get("llm_max_candidates", 5),
+                "competitors.llm_max_candidates",
+            ),
+            llm_timeout_seconds=_as_float(
+                competitors.get("llm_timeout_seconds", 60.0),
+                "competitors.llm_timeout_seconds",
             ),
         ),
         runtime=RuntimeConfig(
