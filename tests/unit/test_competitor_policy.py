@@ -265,3 +265,61 @@ class TestProvisionalDefaults:
         assert classify_offer(candidates).band is CompetitorBand.AMBIGUOUS
         strict = classify_offer(candidates, clear_gap=0.5)
         assert strict.band is CompetitorBand.CLEAR
+
+
+class TestSerialisableGap:
+    """A lone candidate's gap is infinite; the adjudicator payload is strict JSON."""
+
+    def test_a_lone_ambiguous_candidate_reports_no_gap_rather_than_infinity(
+        self,
+    ) -> None:
+        result = classify_offer([signal("A", model_score=-3.0)])
+        assert result.band is CompetitorBand.AMBIGUOUS
+        assert result.gap is None
+
+    def test_every_band_produces_a_json_serialisable_gap(self) -> None:
+        import json
+        from math import isfinite
+
+        for candidates in (
+            [signal("A", model_score=-3.0)],
+            [signal("A", model_score=3.0)],
+            [signal("A", model_score=6.0), signal("B", model_score=6.0)],
+            [signal("A", status="UNRELATED")],
+        ):
+            gap = classify_offer(candidates).gap
+            assert gap is None or isfinite(gap)
+            json.dumps({"gap": gap}, allow_nan=False)
+
+
+class TestDuplicateRelationshipRows:
+    """One master SKU may appear several times: once per source Al Kabeer offer."""
+
+    def test_duplicates_of_one_sku_do_not_become_their_own_runner_up(self) -> None:
+        result = classify_offer(
+            [
+                signal("A", model_score=9.0),
+                signal("A", model_score=9.0),
+                signal("B", model_score=1.0),
+            ]
+        )
+        assert result.band is CompetitorBand.CLEAR
+        assert result.winner == "A"
+        assert result.runner_up_score == pytest.approx(1.0)
+
+    def test_a_sole_sku_repeated_has_no_runner_up_at_all(self) -> None:
+        result = classify_offer(
+            [signal("A", model_score=4.0), signal("A", model_score=4.0)]
+        )
+        assert result.band is CompetitorBand.CLEAR
+        assert result.runner_up_score is None
+
+    def test_the_ranked_shortlist_holds_each_sku_once(self) -> None:
+        result = classify_offer(
+            [
+                signal("A", model_score=9.0),
+                signal("A", model_score=8.0),
+                signal("B", model_score=1.0),
+            ]
+        )
+        assert result.ranked == ("A", "B")

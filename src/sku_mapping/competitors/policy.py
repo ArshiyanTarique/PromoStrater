@@ -28,6 +28,15 @@ from math import inf, isfinite
 #: default rather than imported so this module stays free of discovery.
 SUPPORTED_STATUSES = frozenset({"MATCHED", "AMBIGUOUS"})
 
+#: Columns the decision layer appends to a discovery long frame. Declared here
+#: rather than beside the frame code so discovery can name them without
+#: importing the LLM stack.
+DECISION_COLUMNS = (
+    "competitor_decision",
+    "competitor_decision_reason",
+    "competitor_decision_source",
+)
+
 #: Where the shipped defaults come from. An 8,000-row real slice produced
 #: 2,683 supported relationships over 1,302 competitor offers, 99.1% of them
 #: scored by the model:
@@ -189,7 +198,18 @@ def classify_offer(
             ranked=(),
         )
 
-    ordered = sorted(supported, key=_ordering_key)
+    # One master SKU, one candidate. The same relationship is recorded once per
+    # source Al Kabeer offer, so a shortlist can hold several rows for one SKU.
+    # Left in, they become each other's runner-up: the gap collapses to zero
+    # and a relationship the model was certain about is forced into ambiguity
+    # by nothing but its own duplicates. Keep the best row per SKU.
+    ordered: list[CandidateSignal] = []
+    seen: set[str] = set()
+    for candidate in sorted(supported, key=_ordering_key):
+        if candidate.master_sku in seen:
+            continue
+        seen.add(candidate.master_sku)
+        ordered.append(candidate)
     ranked = tuple(candidate.master_sku for candidate in ordered)
     bounded = ranked[: max(1, max_adjudicated_candidates)]
     scored = [
@@ -227,7 +247,11 @@ def classify_offer(
             winner=top.master_sku,
             top_score=top_score,
             runner_up_score=runner_up_score,
-            gap=gap,
+            # A lone candidate's gap is infinite, which is true but not
+            # serialisable - the adjudicator payload is strict JSON. "No
+            # runner-up to measure against" is the honest reading, and it
+            # travels.
+            gap=gap if isfinite(gap) else None,
             ranked=bounded,
         )
 

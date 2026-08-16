@@ -24,6 +24,7 @@ from sku_mapping.competitors.adjudicator import (
     disabled_verdict,
 )
 from sku_mapping.competitors.policy import (
+    DECISION_COLUMNS,
     CandidateSignal,
     CompetitorBand,
     CompetitorDecision,
@@ -34,11 +35,12 @@ from sku_mapping.competitors.policy import (
 
 LOGGER = logging.getLogger(__name__)
 
-DECISION_COLUMNS = (
-    "competitor_decision",
-    "competitor_decision_reason",
-    "competitor_decision_source",
-)
+__all__ = [
+    "DECISION_COLUMNS",
+    "NOT_DECIDED",
+    "accepted_only",
+    "apply_automatic_decisions",
+]
 
 #: Emitted when the decision layer is switched off, so a downstream reader can
 #: tell "not decided" apart from "decided to reject".

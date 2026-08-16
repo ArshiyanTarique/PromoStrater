@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz, process
 
+from sku_mapping.competitors.policy import DECISION_COLUMNS
 from sku_mapping.competitors.text_normalisation import (
     COMPETITOR_TOKEN_ALIASES,
     strip_competitor_brand,
@@ -896,6 +897,7 @@ def discover_competitors(
     progress: CompetitorProgressCallback | None = None,
     competitor_offers: pd.DataFrame | None = None,
     reranker: Any | None = None,
+    adjudicator: Any | None = None,
 ) -> CompetitorDiscoveryResult:
     """Discover exact dump competitors for distinct mapped Master SKUs.
 
@@ -1282,6 +1284,24 @@ def discover_competitors(
             .reset_index(drop=True)
         )
 
+    # The terminal stage. Ranking above decides ORDER; this decides OUTCOME,
+    # grouped by competitor offer rather than by target, because "which SKU
+    # does this rival product compete with" has one answer per offer. Off by
+    # configuration leaves every row undecided and the frame unchanged.
+    decision_stats: dict[str, int] = {}
+    if getattr(config, "automatic_decisions_enabled", False):
+        from sku_mapping.competitors.decisions import apply_automatic_decisions
+
+        long_format, decision_stats = apply_automatic_decisions(
+            long_format,
+            clear_margin=float(getattr(config, "clear_margin_threshold", 0.0)),
+            clear_gap=float(getattr(config, "clear_gap_threshold", 2.0)),
+            adjudicator=adjudicator,
+            max_adjudicated_candidates=int(
+                getattr(config, "llm_max_candidates", 5)
+            ),
+        )
+
     source_offer_ids = set(
         competitor_pool["_business_offer_id"].map(_safe_text)
     )
@@ -1300,6 +1320,10 @@ def discover_competitors(
                 for code in target_codes
             )
         ),
+        **{
+            f"decision_{key}": int(value)
+            for key, value in decision_stats.items()
+        },
         "matched_competitor_rows": int(supported_row_count),
         "matched_competitor_offer_count": int(
             len(supported_offer_ids)
@@ -1344,7 +1368,20 @@ def discover_competitors(
         )
     return CompetitorDiscoveryResult(
         export=export,
-        long_format=long_format.loc[:, COMPETITOR_LONG_COLUMNS],
+        # The canonical columns, in their canonical order, plus the decision
+        # columns when the decision layer ran. Projecting to the tuple alone
+        # would silently drop the very outcome the run was for.
+        long_format=long_format.loc[
+            :,
+            [
+                *COMPETITOR_LONG_COLUMNS,
+                *[
+                    column
+                    for column in DECISION_COLUMNS
+                    if column in long_format.columns
+                ],
+            ],
+        ],
         long_format_path=audit_output,
         eligible_target_count=int(len(target_codes)),
         diagnostics=diagnostics,

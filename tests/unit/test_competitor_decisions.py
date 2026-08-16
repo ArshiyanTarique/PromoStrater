@@ -221,3 +221,35 @@ class TestDeterminism:
         ) == set(
             backward[backward["competitor_decision"] == "ACCEPTED"]["master_sku"]
         )
+
+
+class TestOnePerOfferInvariant:
+    """A competitor offer competes with at most one Al Kabeer SKU."""
+
+    def test_at_most_one_distinct_master_sku_is_accepted_per_offer(self) -> None:
+        decided, _ = apply_automatic_decisions(
+            frame(
+                row("O1", "A", model_score=9.0),
+                row("O1", "B", model_score=1.0),
+                row("O1", "C", model_score=0.5),
+                row("O2", "A", model_score=8.0),
+                row("O2", "D", model_score=0.0),
+            )
+        )
+        accepted = decided[decided["competitor_decision"] == "ACCEPTED"]
+        per_offer = accepted.groupby("competitor_offer_id")["master_sku"].nunique()
+        assert (per_offer <= 1).all()
+
+    def test_a_repeated_relationship_row_shares_one_decision(self) -> None:
+        """The same pair seen under two source offers is one relationship."""
+        decided, _ = apply_automatic_decisions(
+            frame(
+                row("O1", "A", model_score=9.0),
+                row("O1", "A", model_score=9.0),
+                row("O1", "B", model_score=1.0),
+            )
+        )
+        accepted = decided[decided["competitor_decision"] == "ACCEPTED"]
+        assert accepted["master_sku"].nunique() == 1
+        assert set(accepted["master_sku"]) == {"A"}
+        assert len(accepted) == 2
