@@ -21,6 +21,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from sku_mapping.config import PipelineConfig
+from sku_mapping.matching.routing import RoutingMode
 from sku_mapping.constants import FinalMatchDecision, MLDeploymentMode
 from sku_mapping.failure_diagnostics import capture_exception_details
 from sku_mapping.features.commercial_entities import expand_offer_entities
@@ -961,8 +962,12 @@ def run_unified_inference(
         shadow_mode=shadow_config,
         agreement=replace(
             config.agreement,
+            # The global Gemini toggle decides the cut-off, so the own-brand
+            # path and the shared matcher cannot disagree about what counts as
+            # good enough in a given run. Was config.ml.auto_accept_threshold,
+            # which pinned production to one number whatever the toggle said.
             lightgbm_auto_accept_threshold=(
-                config.ml.auto_accept_threshold
+                RoutingMode.from_config(config).auto_accept_threshold
             ),
         ),
     )
