@@ -481,8 +481,26 @@ class LLMReviewConfig:
     reject_all_route: str
     cache_responses: bool
     cache_path: Path
+    #: Auto-accept model-score cut-offs for the two modes of the global toggle.
+    #: MODEL SCORES, not probabilities of correctness: 0.95 does not mean "95%
+    #: accurate". With a reviewer behind it the cut can afford to be strict;
+    #: with no reviewer the residue is a human queue, so it relaxes.
+    on_auto_accept_threshold: float = 0.95
+    off_auto_accept_threshold: float = 0.85
 
     def __post_init__(self) -> None:
+        for name in ("on_auto_accept_threshold", "off_auto_accept_threshold"):
+            value = getattr(self, name)
+            if not 0 < value <= 1:
+                raise ConfigurationError(
+                    f"llm_review.{name} must be within (0, 1]"
+                )
+        if self.off_auto_accept_threshold > self.on_auto_accept_threshold:
+            raise ConfigurationError(
+                "llm_review.off_auto_accept_threshold must not exceed "
+                "on_auto_accept_threshold: turning the reviewer off should "
+                "automate more, not less"
+            )
         if not self.provider.strip():
             raise ConfigurationError("llm_review.provider must be non-empty")
         if self.enabled and not self.model.strip():
@@ -1099,6 +1117,14 @@ def load_config(path: str | Path) -> PipelineConfig:
             cache_responses=_as_bool(
                 llm_review.get("cache_responses", True),
                 "llm_review.cache_responses",
+            ),
+            on_auto_accept_threshold=_as_float(
+                llm_review.get("on_auto_accept_threshold", 0.95),
+                "llm_review.on_auto_accept_threshold",
+            ),
+            off_auto_accept_threshold=_as_float(
+                llm_review.get("off_auto_accept_threshold", 0.85),
+                "llm_review.off_auto_accept_threshold",
             ),
             cache_path=_resolve_path(
                 llm_review.get(

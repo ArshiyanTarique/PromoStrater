@@ -37,6 +37,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from sku_mapping.matching.routing import RouteOutcome, RoutingMode
+
 LOGGER = logging.getLogger(__name__)
 
 #: The own-brand production threshold, reused unchanged. Deliberately not a new
@@ -62,6 +64,9 @@ class MatchDecisionOutcome(str, Enum):
     LLM_ACCEPT = "LLM_ACCEPT"
     REJECTED = "REJECTED"
     NO_CANDIDATE = "NO_CANDIDATE"
+    #: Only reachable with the global LLM toggle OFF. An explicit manual queue,
+    #: not a failure - and never produced when the toggle is ON.
+    HUMAN_VALIDATION = "HUMAN_VALIDATION"
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,7 @@ class MatchRunStats:
     at_or_above_threshold: int = 0
     below_threshold: int = 0
     no_candidate: int = 0
+    human_validation: int = 0
     llm_calls: int = 0
     llm_accepts: int = 0
     llm_rejects: int = 0
@@ -122,6 +128,9 @@ class MatchResult:
     matches: tuple[OfferMatch, ...]
     stats: MatchRunStats
     threshold: float = SHARED_AUTO_ACCEPT_THRESHOLD
+    #: The mode this run used. Recorded so an output can always be traced back
+    #: to the toggle state that produced it.
+    mode: "Any | None" = None
 
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -296,7 +305,7 @@ def match_offers(
     *,
     package: Mapping[str, Any],
     population: OfferPopulation | str = OfferPopulation.OWN,
-    threshold: float = SHARED_AUTO_ACCEPT_THRESHOLD,
+    mode: "RoutingMode | None" = None,
     adjudicator: Any | None = None,
     top_k: int | None = None,
     matcher: "SharedMatcher | None" = None,
@@ -318,13 +327,17 @@ def match_offers(
     from sku_mapping.competitors.policy import CompetitorDecisionReason
 
     population = OfferPopulation(population)
+    # One canonical source for the threshold and the review destination. The
+    # matcher never picks a number itself.
+    mode = mode or RoutingMode.from_toggle(adjudicator is not None)
+    threshold = mode.auto_accept_threshold
     stats = MatchRunStats()
     selected = select_population(offers, population)
     if "offerid" in selected.columns:
         selected = selected.drop_duplicates("offerid")
     stats.offers_processed = int(len(selected))
     if selected.empty:
-        return MatchResult(population, (), stats, threshold)
+        return MatchResult(population, (), stats, threshold, mode)
 
     engine = matcher or SharedMatcher(
         package, product_master, threshold=threshold, top_k=top_k
@@ -350,7 +363,7 @@ def match_offers(
             continue
 
         best = candidates[0]
-        if best.calibrated_score >= threshold:
+        if mode.decide(best.calibrated_score) is RouteOutcome.AUTO_ACCEPT:
             stats.at_or_above_threshold += 1
             matches.append(
                 OfferMatch(
@@ -362,6 +375,20 @@ def match_offers(
             continue
 
         stats.below_threshold += 1
+        # Toggle OFF: this is where the run stops being automatic. No provider
+        # is consulted and none is even constructed, so an OFF run needs no API
+        # key and makes no call.
+        if not mode.routes_to_llm:
+            stats.human_validation += 1
+            matches.append(
+                OfferMatch(
+                    offer_id, offer_name, population,
+                    MatchDecisionOutcome.HUMAN_VALIDATION, None,
+                    best.calibrated_score, "BELOW_THRESHOLD_HUMAN_VALIDATION",
+                    candidates,
+                )
+            )
+            continue
         if adjudicator is None:
             matches.append(
                 OfferMatch(
@@ -426,7 +453,7 @@ def match_offers(
                 verdict.reason.value, candidates,
             )
         )
-    return MatchResult(population, tuple(matches), stats, threshold)
+    return MatchResult(population, tuple(matches), stats, threshold, mode)
 
 
 def competitors_for_master(

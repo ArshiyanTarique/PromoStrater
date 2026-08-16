@@ -27,6 +27,7 @@ from dashboard.services.processing_service import DashboardProcessRequest
 from dashboard.services.upload_service import UploadValidationError
 from dashboard.theme import inject_theme
 from sku_mapping.constants import MLDeploymentMode
+from sku_mapping.matching.routing import RoutingMode
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,14 +138,46 @@ with st.container(border=True):
         status_label = "Assisted mode" if mode_value == "assisted" else "Shadow evaluation only"
         st.caption(f"Version: **{selected_model.model_version}** · Mode: {status_label}")
 
-    with st.columns(2)[0]:
+    # ONE switch for both populations. Own-brand and competitor offers run the
+    # same engine, so a per-population toggle would only let the two drift.
+    st.markdown("**Matching Mode**")
+    mode_columns = st.columns([1, 2])
+    with mode_columns[0]:
         enable_llm = st.toggle(
-            "Request local LLM review",
+            "Gemini Review",
             value=config.llm_review.enabled,
             disabled=is_running,
             key="enable_llm",
-            help="Records LLM reviewer availability and calls.",
+            help=(
+                "One switch for both Al Kabeer and competitor offers. It "
+                "changes the auto-accept cut-off and where below-cut-off "
+                "offers go. Candidate generation and model scoring are "
+                "identical either way."
+            ),
         )
+    active_mode = RoutingMode.from_toggle(
+        enable_llm,
+        llm_on_threshold=config.llm_review.on_auto_accept_threshold,
+        llm_off_threshold=config.llm_review.off_auto_accept_threshold,
+    )
+    with mode_columns[1]:
+        # Deliberately "model score", never "confidence" or "% accuracy": the
+        # thresholds are operational cut-offs and nothing here has measured
+        # accuracy at either point.
+        if active_mode.llm_review_enabled:
+            st.success(
+                f"**ON** · Auto-accept model score "
+                f"**{active_mode.auto_accept_threshold:.2f}** · "
+                "Below threshold: **Gemini Review** (no human needed)",
+                icon="🤖",
+            )
+        else:
+            st.info(
+                f"**OFF** · Auto-accept model score "
+                f"**{active_mode.auto_accept_threshold:.2f}** · "
+                "Below threshold: **Human Validation** · No Gemini calls",
+                icon="👤",
+            )
 
     allow_duplicate = st.checkbox(
         "Explicitly confirm reprocessing identical file bytes",

@@ -164,7 +164,20 @@ agreement:
   hard_conflict_route: manual_review
 
 llm_review:
+  # THE GLOBAL TOGGLE. One switch for both populations - own-brand and
+  # competitor. ON routes every below-threshold offer to Gemini and the run
+  # needs no human to finish. OFF makes no API call at all and sends the
+  # residue to Human Validation.
   enabled: false
+  # Auto-accept cut-offs selected by the toggle above.
+  # MODEL SCORES, NOT PROBABILITIES OF CORRECTNESS. 0.95 does not mean "95%
+  # accurate" and 0.85 does not mean "85% accurate"; neither point has ever
+  # been measured against a human-labelled set. They are operational choices
+  # about how much of the dump to automate. With a reviewer behind it the cut
+  # can afford to be strict; with no reviewer the residue lands on a person,
+  # so it relaxes. Never label these "confidence" on any user-facing surface.
+  on_auto_accept_threshold: 0.95
+  off_auto_accept_threshold: 0.85
   provider: ollama
   model: llama3.1:8b
   endpoint: http://localhost:11434
