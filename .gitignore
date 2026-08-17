@@ -115,3 +115,7 @@ node_modules/
 # npm
 package-lock.json
 npm-debug.log*
+
+# Office lock files (e.g. ~$Product_Master.xlsx) created while a workbook
+# is open. Transient, machine-local, never meaningful to commit.
+~$*

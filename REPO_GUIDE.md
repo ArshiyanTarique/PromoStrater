@@ -25,54 +25,58 @@ Supermarkets publish promotional flyers. A data vendor ("ClickFlyer") scrapes th
 
 ## 2. Big picture
 
+Both populations ask the same catalogue the same question with the same machinery. The only thing that differs is the *business relationship* being established.
+
 ```
-ClickFlyer dump (CSV/XLSX)
-        │
-        ▼
-  preprocessing            data/preprocessing.py
-  · normalise text, parse pack sizes
-  · categorise, derive product_family
-  · set is_own  (brand == Al Kabeer?)
-        │
-        ├───────────────── is_own = True ─────────────────┐
-        │                                                  │
-        │                                     ┌────────────▼────────────┐
-        │                                     │ candidate generation    │
-        │                                     │ shortlist of Master SKUs│
-        │                                     └────────────┬────────────┘
-        │                                                  ▼
-        │                                     ┌─────────────────────────┐
-        │                                     │ 41 features per pair    │
-        │                                     └────────────┬────────────┘
-        │                                                  ▼
-        │                                     ┌─────────────────────────┐
-        │                                     │ LightGBM (ranked-v5-cal)│
-        │                                     └────────────┬────────────┘
-        │                                                  ▼
-        │                                     ┌─────────────────────────┐
-        │                                     │ routing.py — ONE toggle │
-        │                                     │ LLM on : ≥0.95 → AUTO   │
-        │                                     │          <0.95 → Gemini │
-        │                                     │ LLM off: ≥0.85 → AUTO   │
-        │                                     │          <0.85 → Human  │
-        │                                     └────────────┬────────────┘
-        │                                                  ▼
-        │                                         final SKU mapping
-        │                                                  │
-        └───────────────── is_own = False ─────────────────┤
-                          │                                │
-              ┌───────────▼────────────────────────────────▼──────────┐
-              │ competitor discovery  competitors/discovery.py         │
-              │ for each mapped Master SKU, scan every rival offer:    │
-              │ category → family → protein/family conflict → pack →   │
-              │ fuzzy score floors → MATCHED / AMBIGUOUS / rejected    │
-              │ (optional) ML re-rank, then automatic ACCEPT/REJECT    │
-              └───────────────────────┬───────────────────────────────┘
-                                      ▼
-                     exports + SQLite + dashboard downloads
+                    ClickFlyer dump (CSV/XLSX)
+                              │
+                              ▼
+                     preprocessing              data/preprocessing.py
+                     · normalise text, parse pack sizes
+                     · categorise, derive product_family
+                     · set is_own  (brand == Al Kabeer?)
+                              │
+                     ┌────────┴────────┐
+                     │  is_own split   │
+                     └────┬───────┬────┘
+              is_own=True │       │ is_own=False
+                          ▼       ▼
+                    OWN-SKU     COMPETITOR
+                          │       │
+                          └───┬───┘
+                              ▼
+                  SAME candidate generator      matching/candidate_generator.py
+                  (shortlist of Master SKUs)
+                              ▼
+                  SAME 41 features              features/
+                              ▼
+                  SAME LightGBM                 ranked-v5-cal package
+                              ▼
+                  SAME routing                  matching/routing.py
+                  ┌───────────┴───────────┐
+              LLM ON                   LLM OFF
+              ≥0.95 AUTO               ≥0.85 AUTO
+              <0.95 → Gemini           <0.85 → Human Validation
+                  └───────────┬───────────┘
+                              ▼
+                    final relationships
+                    · own      → "this offer IS SKU X"
+                    · competitor → "this rival offer COMPETES WITH SKU X"
+                              ▼
+                  exports + SQLite + dashboard downloads
 ```
 
-The two populations answer different questions but share preprocessing, the catalogue, and the same threshold module.
+> **Competitors are hybrid, by measurement.** Own-brand runs the flow above.
+> Competitors deliberately do **not** use the model as their classifier:
+> measured on a real samosa slice, replacing the rules with the own-brand
+> model cut CKSA from **194 competitors to 4** and lost Biladi entirely
+> (0.2477 against a 0.85 cut). The package is trained on Al Kabeer→Al Kabeer
+> pairs and scores rival text out of domain, so it ranks — it never admits or
+> rejects.
+>
+> The live competitor path is **retrieval → ML ranking → automatic policy →
+> Gemini**, all inside `competitors/discovery.py`. Recall is measured as
+> preserved: 307/307 relationships, zero lost. See §7.
 
 ---
 
@@ -110,7 +114,8 @@ The two populations answer different questions but share preprocessing, the cata
 | `src/sku_mapping/constants.py` | `MODEL_FEATURE_COLUMNS` (19 base features). | The shared training/inference contract. |
 | `src/sku_mapping/features/feature_generator.py` | Assembles the per-pair feature vector. | Where a new feature goes. |
 | `src/sku_mapping/ml/model_package.py` | Loads and validates the model package. | Rejects wrong Python/LightGBM/sklearn — a common setup failure. |
-| `src/sku_mapping/competitors/discovery.py` | Master-SKU-centric competitor search. | The competitor engine. |
+| `src/sku_mapping/competitors/discovery.py` | Competitor search over the dump. | The **live** competitor engine today (see §7). |
+| `src/sku_mapping/matching/shared_matcher.py` | One engine for own + competitor. | The **target** design; currently unreferenced. |
 | `src/sku_mapping/competitors/policy.py` | Automatic ACCEPT/REJECT rules. | Provisional thresholds live here. |
 | `src/sku_mapping/competitors/adjudicator.py` | LLM decision for ambiguous competitors. | Last stage before a terminal decision. |
 | `src/sku_mapping/llm_review/gemini.py` | Gemini HTTP provider. | Prompt→text only; no policy. |
@@ -134,9 +139,19 @@ The two populations answer different questions but share preprocessing, the cata
 | 7 | Features | `features/feature_generator.py` + rank/discriminative builders | Builds the 41-column numeric frame for every (offer, candidate) pair. |
 | 8 | Score | `ml/ranked_predictor.py` | The registered LightGBM package scores each pair. |
 | 9 | Route | `matching/routing.py` | Applies the active threshold; sends the residue to Gemini or to the human queue. |
-| 10 | Competitors | `competitors/discovery.py` | For each mapped Master SKU, evaluates every rival offer in the dump. |
+| 10 | Competitor relationships | `competitors/discovery.py` (via `exports/business_outputs.py`) | Establishes which rival offers compete with which Master SKU. See the note below. |
 | 11 | Export | `exports/business_outputs.py`, `exports/run_outputs.py` | Writes the SKU mapping, competitor aggregate, and long-form audit. |
 | 12 | Persist | `learning/observer.py` → `learning/store.py` | Records the run, predictions, and decisions. Five review questions are selected if eligible. |
+
+**How the two populations relate.** Preprocessing sets `is_own` once (step 3), and that flag is the only thing that separates them. Steps 6–9 — candidates, features, model, routing — are the shared engine, and the global LLM toggle governs both. Competitor results are grouped back by Master SKU at export time, because a competitor answer is *reported* per SKU even though it is *decided* per offer.
+
+> **Sequencing, accurately.** Steps 6–9 currently run for the **own-brand**
+> population. Step 10 is then invoked from `build_business_outputs`, and today
+> it uses its own rule-gate + fuzzy engine rather than steps 6–9. So the
+> present code does run competitors after own-brand mapping — not because the
+> design requires it, but because the competitor path has not yet been moved
+> onto the shared matcher. Don't read the current ordering as intentional
+> architecture.
 
 Inference **never trains**. No stage in this list fits a model.
 
@@ -179,16 +194,38 @@ Flipping the toggle changes *only* the threshold and the destination. Candidates
 
 ## 7. Competitor mapping
 
-The direction of the question is the key difference:
+### The conceptual difference
 
-| | Asks | Answer shape |
+Both populations map an offer to a Master SKU. What differs is the *claim* being made:
+
+| | Asks | Claim |
 |---|---|---|
-| **Own-SKU** | "Which Master SKU *is* this offer?" | one SKU per offer |
-| **Competitor** | "Which rival offers compete with this Master SKU?" | many offers per SKU |
+| **Own-SKU** | "Which Master SKU **is** this offer?" | identity — this row *is* our product |
+| **Competitor** | "Which Master SKU does this rival offer **map to** for competitive purposes?" | rivalry — this row *competes with* our product |
 
-`competitors/discovery.py` loops **each mapped Master SKU** against **every non-own offer** in the dump. A competitor does *not* need to be mapped first — the relationship is discovered here.
+The matching machinery is meant to be identical; only the interpretation changes. A competitor never needs to be mapped first — the relationship is established directly.
 
-Per candidate relationship, in order:
+### Target architecture
+
+```
+non-Al-Kabeer offer
+        ▼
+shared candidate generator
+        ▼
+same 41 features
+        ▼
+same LightGBM
+        ▼
+global routing (same toggle, same thresholds)
+        ▼
+competitor → Master SKU relationship
+```
+
+`matching/shared_matcher.py` implements exactly this. It is **not** the competitor production path, and deliberately so: applying the own-brand model as a competitor classifier was measured to cut CKSA from 194 competitors to 4 and lose Biladi. It remains as the reference design for the day a competitor-trained model exists.
+
+### Live implementation
+
+Today the relationship is established by `competitors/discovery.py`, reached from `build_business_outputs`. It iterates each mapped Master SKU against every non-own offer and applies rule gates before a fuzzy score:
 
 | Gate | Rejects with |
 |---|---|
@@ -201,21 +238,33 @@ Per candidate relationship, in order:
 
 Survivors become `MATCHED` (pack verified) or `AMBIGUOUS` (pack unknown). Every rejection carries a reason code, so the wide aggregate is provably a projection of the long-form audit table.
 
-Optional layers, **all off by default**:
+On top of that sit the layers that move competitors toward fully automatic decisions. **All are off by default**, so a stock checkout runs rules-only:
 
 | Config flag | Module | Effect |
 |---|---|---|
-| `ml_reranking_enabled` | `competitors/reranker.py` | Reorders the surviving shortlist with the own-brand LightGBM package. **Ranking only** — cannot admit, reject, or override a conflict, and its output is a raw margin, never a probability. |
-| `automatic_decisions_enabled` | `competitors/policy.py`, `decisions.py` | Turns every relationship into a terminal ACCEPT/REJECT using margin/gap thresholds. |
-| `llm_adjudication_enabled` | `competitors/adjudicator.py` | Sends the cases policy can't settle to the LLM. Anything unresolved **rejects** — the safe direction, since a wrong competitor asserts a rivalry that doesn't exist. |
-| `review_staging_per_target` | `competitors/review.py` | Stages top-ranked competitors into the store for human labelling. |
+| `ml_reranking_enabled` | `competitors/reranker.py` | Reorders the surviving shortlist with the own-brand LightGBM package. **Ranking only** — cannot admit or reject a candidate, cannot override a conflict, and its output is a raw margin, never a probability. |
+| `automatic_decisions_enabled` | `competitors/policy.py` → `decisions.py` | Turns every relationship into a terminal ACCEPT/REJECT using margin and gap thresholds. No human is involved. |
+| `llm_adjudication_enabled` | `competitors/adjudicator.py` | Sends the cases policy cannot settle to Gemini. Anything unresolved **rejects**. |
+| `review_staging_per_target` | `competitors/review.py` | **Offline only.** Stages top-ranked competitors for human labelling to build ground truth. Not part of the production decision path. |
 
-### Legacy / not-yet-wired code
+**There is no production human route for competitors.** With the decision layers enabled, every relationship ends ACCEPTED or REJECTED automatically. Human review of competitors exists solely as a development/evaluation mechanism (page 6 + `review_staging_per_target`, default `0`).
 
-- **`matching/shared_matcher.py` is not imported by anything.** It describes one engine serving both populations, and reads as the intended direction — but no runtime module, and no test, imports it. Treat it as staged, not active.
-- **`agreement/`** and the `agreement:` block in `config/default.yaml` survive from the older two-scorer design (LightGBM + embeddings). `routing.py` is now the threshold authority; `agreement.lightgbm_auto_accept_threshold` overlaps with it confusingly.
-- Competitor discovery still scores with **fuzzy text floors**, not the model. The re-ranker is bolted on top and off by default.
-- The `embedding/` package was deliberately deleted; references you find in old docs or on `main` are stale.
+### Module status — verified by actual callers
+
+| Module | Status | Evidence |
+|---|---|---|
+| `competitors/discovery.py` | **ACTIVE** | Called from `exports/business_outputs.py:404`, reached from `processing_service.py:571`. |
+| `competitors/text_normalisation.py` | **ACTIVE** | Imported by `discovery.py` and `reranker.py`. |
+| `competitors/policy.py` | **ACTIVE** | `DECISION_COLUMNS` imported by `discovery.py`; thresholds used by `decisions.py`. |
+| `competitors/decisions.py` | **ACTIVE (gated)** | Imported lazily at `discovery.py:1293`; runs when `automatic_decisions_enabled`. |
+| `competitors/adjudicator.py` | **ACTIVE (gated)** | Imported by `decisions.py`; runs when `llm_adjudication_enabled`. |
+| `competitors/reranker.py` | **ACTIVE (gated)** | `load_competitor_reranker` imported by `processing_service.py:198`. |
+| `competitors/review.py` | **ACTIVE (offline)** | Imported by `dashboard/pages/6_Competitor_Review.py`. |
+| `matching/shared_matcher.py` | **UNUSED (by decision)** | Zero importers. Pure-ML competitor matching was measured to destroy recall, so the hybrid path is production instead. |
+| `agreement/` + `agreement:` config block | **TRANSITIONAL** | Survives from the older two-scorer design. `routing.py` is the threshold authority; `agreement.lightgbm_auto_accept_threshold` overlaps confusingly. |
+| `embedding/` | **REMOVED** | Package deleted. References in old docs or on `main` are stale. |
+
+None of these is dead code you can delete — the gated ones run as soon as their flag is set. The one genuinely unreferenced module is `shared_matcher.py`, and it is unreferenced because it is ahead of the wiring, not behind it.
 
 ---
 
@@ -229,9 +278,28 @@ Optional layers, **all off by default**:
 | **When called** | Only for offers below the auto-accept threshold, and only when `llm_review.enabled: true`. |
 | **What it receives** | The offer text plus a bounded list of candidates the pipeline already produced (`maximum_candidates: 5`). |
 
-**It cannot invent a SKU.** The reviewer validates every returned candidate id against the list it supplied; anything unrecognised is discarded and the row routes to review. Gemini is a *reviewer*, never the matcher.
+**It cannot invent a SKU.** The reviewer validates every returned candidate id against the list it supplied; anything unrecognised is discarded. Gemini is a *reviewer*, never the matcher.
 
-**On failure** — timeout, malformed reply, refusal, or an invented id — the row takes the fail-safe route (`fail_route: manual_review` for own-brand; **REJECTED** for competitor adjudication). Failures never become acceptances.
+### Failure behaviour differs by population
+
+The two populations have different safe directions, and mixing them up is the easiest mistake to make here.
+
+**Own-SKU** — the residue can land on a person:
+
+| Toggle | Below threshold goes to | If Gemini fails |
+|---|---|---|
+| LLM **ON** | Gemini | `fail_route: manual_review` |
+| LLM **OFF** | Human Validation directly | no API call is made at all |
+
+**Competitor** — the residue must never need a person:
+
+| Gemini outcome | Result |
+|---|---|
+| ACCEPT (valid supplied candidate) | automatic competitor match |
+| REJECT | automatic rejection |
+| UNCERTAIN, malformed reply, timeout, API failure, invented/unrecognised SKU | **conservative automatic rejection** |
+
+Every competitor failure mode converges on REJECTED. That is deliberate: a missed competitor understates a rival's presence, while a wrong one asserts a rivalry that does not exist — so rejection is the safe direction. **Competitor production has no human-review dependency.**
 
 > **Note:** `config/default.yaml` currently sets `llm_review.provider: ollama`, not `gemini`, and `enabled: false`. Gemini is implemented but not the configured default. Its API key is read from the environment, never from config.
 
@@ -319,6 +387,26 @@ Processing runs on a **daemon thread**, with state in SQLite rather than session
 | `competitors.automatic_decisions_enabled` | `false` | Terminal ACCEPT/REJECT without a human. |
 | `competitors.llm_adjudication_enabled` | `false` | Ask the LLM about ambiguous competitors. |
 
+### The one global toggle
+
+`llm_review.enabled` is a single switch governing **both** populations:
+
+| | Auto-accept at | Below goes to |
+|---|---|---|
+| **ON** | `0.95` | Gemini — the run finishes with no human |
+| **OFF** | `0.85` | Human Validation queue (own-SKU); no API call is made |
+
+What the toggle changes: **the threshold and the review destination. Nothing else.**
+
+| | Changes with the toggle? |
+|---|---|
+| Candidate generation | No — identical |
+| The 41 features | No — identical |
+| LightGBM model and scores | No — identical |
+| Threshold + review destination | **Yes** |
+
+That equivalence is asserted in `tests/unit/test_toggle_production_wiring.py`, and it is the reason the toggle is safe to flip on a live deployment.
+
 Never put credentials in this file. The Gemini key comes from the environment.
 
 ---
@@ -357,13 +445,16 @@ Never put credentials in this file. The Gemini key comes from the environment.
 | I need to change… | Start here |
 |---|---|
 | Text cleaning, `is_own`, categories, pack parsing | `src/sku_mapping/data/preprocessing.py` |
-| Which SKUs get shortlisted | `src/sku_mapping/matching/candidate_generator.py` |
+| Which SKUs get shortlisted (both populations) | `src/sku_mapping/matching/candidate_generator.py` |
+| The shared own+competitor engine (reference only) | `src/sku_mapping/matching/shared_matcher.py` — **not production**; needs a competitor-trained model first |
 | A feature the model sees | `src/sku_mapping/features/feature_generator.py` + `constants.py` |
 | Model loading / validation | `src/sku_mapping/ml/model_package.py` |
 | A threshold or where reviews go | `src/sku_mapping/matching/routing.py` — **nowhere else** |
 | Gemini prompt, parsing, or failure behaviour | `src/sku_mapping/llm_review/reviewer.py` (policy), `gemini.py` (transport) |
-| Competitor gates or scoring | `src/sku_mapping/competitors/discovery.py` |
-| Competitor accept/reject rules | `src/sku_mapping/competitors/policy.py` |
+| Competitor gates or scoring (**live path**) | `src/sku_mapping/competitors/discovery.py` |
+| Competitor accept/reject rules | `src/sku_mapping/competitors/policy.py` → `decisions.py` |
+| Competitor LLM adjudication | `src/sku_mapping/competitors/adjudicator.py` |
+| Competitor ranking with the model | `src/sku_mapping/competitors/reranker.py` |
 | Anything touching the database | `src/sku_mapping/learning/store.py` |
 | A schema/column change | `src/sku_mapping/learning/migrations.py` (add a migration) |
 | A page, control, or progress display | `dashboard/pages/`, `dashboard/components/` |
@@ -379,11 +470,12 @@ Never put credentials in this file. The Gemini key comes from the environment.
 
 - **`main` is far behind.** The current branch is `stage1-ml-only-routing`. `main` still contains the removed embedding architecture and the older two-scorer agreement policy. Don't read `main` to learn the system.
 - **Thresholds are provisional and unvalidated.** `0.95` / `0.85` are operational choices, never measured against a human-labelled set. The competitor margin/gap thresholds come from an 8,000-row slice with **no human competitor labels at all**.
-- **Competitor precision and recall have never been independently validated.** There is no competitor ground truth. `review_staging_per_target` exists to start collecting it and defaults to `0`.
-- **The competitor re-ranker borrows the own-brand model**, which was trained on Al Kabeer→Al Kabeer pairs. It is restricted to ranking for exactly that reason.
-- **`shared_matcher.py` is unwired** — written, unreferenced, untested.
+- **Competitor precision and recall have never been independently validated.** There is no competitor ground truth at all. `review_staging_per_target` exists to start collecting it and defaults to `0`.
+- **The competitor migration is mid-flight.** The shared engine is the agreed target and is implemented in `matching/shared_matcher.py`, but nothing imports it yet, so competitors still run the rule-gate + fuzzy path in `discovery.py`. Both are real; neither is dead. Treat §7's status table as the source of truth.
+- **The competitor re-ranker borrows the own-brand model**, trained on Al Kabeer→Al Kabeer pairs. It is restricted to ranking for exactly that reason, and its output is an uncalibrated margin.
+- **The automatic competitor decision layers are off by default** (`automatic_decisions_enabled`, `llm_adjudication_enabled`, `ml_reranking_enabled` all `false`), so a stock checkout produces rules-only competitor output.
 - **`agreement/` overlaps `routing.py`**, leaving two places that look like threshold authorities. Only `routing.py` is.
-- **Gemini is implemented but not the configured provider**, and `llm_review.enabled` is `false`, so no LLM runs by default.
+- **Gemini connectivity is unverified in this repository.** The provider is implemented, but `llm_review.provider` is `ollama` and `llm_review.enabled` is `false`, so no LLM call is made by default and no test exercises a real external API.
 - **Pack size is a hard conflict at ±10%**, so a 500g rival pack is never a competitor to a 240g SKU. That's a deliberate business rule, not a bug — but it's the single largest source of competitor rejections after family conflict.
 - **SQLite, single host.** No multi-user authorisation; the dashboard ships no authentication.
 
@@ -392,14 +484,15 @@ Never put credentials in this file. The Gemini key comes from the environment.
 ## 15. Ten-minute handover talking points
 
 1. **What it does** — maps flyer offers to Al Kabeer's catalogue, and finds which rival offers compete with each catalogue item.
-2. **Two questions, one direction each** — own-SKU is "which SKU is this offer?"; competitor is "which offers compete with this SKU?"
-3. **The flow** — preprocess → split by `is_own` → candidates → 41 features → LightGBM → route → competitors → exports + SQLite.
+2. **One engine, two claims** — the dump is split by `is_own`, and both populations use the same candidate generator, the same 41 features and the same LightGBM. What differs is the business relationship being established: own-SKU asserts *identity* ("this offer **is** SKU X"), competitor asserts *rivalry* ("this rival offer **competes with** SKU X").
+3. **The flow** — preprocess → split by `is_own` → shared candidates → 41 features → LightGBM → routing → final relationships → exports + SQLite.
 4. **41 = 19 + 6 + 16** — base contract, discriminative features, rank-aware features. `MODEL_FEATURE_COLUMNS` is only the 19.
 5. **One toggle, two thresholds** — `llm_review.enabled` picks 0.95→Gemini or 0.85→Human. Everything else is identical, and tests assert that.
 6. **Thresholds are model scores, not accuracy** — never call them confidence.
-7. **Gemini reviews, it never matches** — it only chooses among supplied candidates, and every failure mode falls back safely.
-8. **Competitors are rule-gated, not model-decided** — category, family, protein, pack, then fuzzy floors. The model can only re-rank, and that's off by default.
-9. **Every competitor rejection has a reason code** — the user-facing aggregate is a projection of the long-form audit, so the two can't disagree.
-10. **The database is the source of truth** — job state lives in SQLite, not session state, which is why a refresh doesn't lose a run.
-11. **Inference never trains** — retraining is a separate, operator-triggered champion/challenger workflow.
-12. **When something breaks** — read `inference/pipeline.py` for the orchestration, check `processing_jobs` for the run's real state, and remember that `routing.py` is the only place a threshold lives.
+7. **Gemini reviews, it never matches** — it only chooses among supplied candidates, and the reviewer rejects any id it didn't supply.
+8. **Failure directions differ by population** — an own-SKU failure falls back to a human; a competitor failure (uncertain, timeout, malformed, invented SKU) is a conservative automatic REJECT. Competitor production needs no human.
+9. **The competitor migration is mid-flight** — the target is the shared matcher; the live path is still `discovery.py`'s rule gates plus fuzzy floors, with the model as an optional re-ranker. Know which one you're editing.
+10. **Every competitor rejection has a reason code** — the user-facing aggregate is a projection of the long-form audit, so the two can't disagree.
+11. **The database is the source of truth** — job state lives in SQLite, not session state, which is why a refresh doesn't lose a run.
+12. **Inference never trains** — retraining is a separate, operator-triggered champion/challenger workflow.
+13. **When something breaks** — read `inference/pipeline.py` for the orchestration, check `processing_jobs` for the run's real state, and remember that `routing.py` is the only place a threshold lives.
