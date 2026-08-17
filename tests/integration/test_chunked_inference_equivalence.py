@@ -22,6 +22,7 @@ from sku_mapping.data.preprocessing import (
     preprocess_clickflyer,
     preprocess_product_master,
 )
+from sku_mapping.llm_review import reviewer as llm_reviewer
 from sku_mapping.shadow import pipeline as shadow_pipeline
 from sku_mapping.shadow.pipeline import (
     _frame_fingerprint,
@@ -37,7 +38,11 @@ FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=timezone.utc)
 #: would make these tests take minutes, so the tests write the field directly to
 #: force several chunks over a handful of offers. The chunking mechanism itself
 #: is size-agnostic; only the configured bound is opinionated.
-TEST_CHUNK_SIZES = (2, 3, 4)
+#: 1 puts every offer in its own chunk, which maximises the number of chunk
+#: boundaries and therefore the chance of per-chunk state leaking. 5 leaves a
+#: remainder of 4, and 9 is the whole fixture in one chunk - the streaming code
+#: path exercised against the same input the single-pass path sees.
+TEST_CHUNK_SIZES = (1, 2, 3, 4, 5, 9)
 
 
 class _FakePredictor:
@@ -181,18 +186,12 @@ def _config(tmp_path, chunk_size: int, label: str):
         },
     )
     object.__setattr__(shadow, "chunk_size", chunk_size)
-    embedding = replace(
-        config.embedding,
-        backend="local_hashing",
-        cache_path=tmp_path / label / "embedding.sqlite3",
-    )
     llm_review = replace(
         config.llm_review, cache_path=tmp_path / label / "llm.sqlite3"
     )
     return replace(
         config,
         shadow_mode=shadow,
-        embedding=embedding,
         llm_review=llm_review,
     )
 
@@ -207,6 +206,14 @@ class _FixedClock:
 
 def _run(tmp_path, monkeypatch, *, chunk_size: int, label: str, offers, master):
     monkeypatch.setattr(shadow_pipeline, "datetime", _FixedClock)
+    # The reviewer stamps each review with the wall clock at the moment it
+    # ran, which is correct for an audit field and is exactly why it has to
+    # be frozen here: two runs of the same input genuinely happen at
+    # different times, so a real clock makes the artifacts differ for a
+    # reason that has nothing to do with chunking. Freezing one clock and not
+    # the other left this path unpinned - invisible until routing began
+    # sending offers to review at all.
+    monkeypatch.setattr(llm_reviewer, "datetime", _FixedClock)
     monkeypatch.setattr(
         shadow_pipeline,
         "load_registered_shadow_package",

@@ -174,4 +174,21 @@ def create_llm_provider(config: LLMReviewConfig) -> LLMProvider:
             configured_model=config.model,
             base_endpoint=config.endpoint,
         )
+    if provider_name == "gemini":
+        # Imported here so the Gemini module - and its environment key lookup -
+        # is only touched by a run that actually selected it.
+        from sku_mapping.llm_review.gemini import DEFAULT_ENDPOINT, GeminiProvider
+
+        endpoint = (config.endpoint or "").strip()
+        return GeminiProvider(
+            configured_model=config.model,
+            # The Ollama default endpoint is meaningless for Gemini; a config
+            # still pointing at localhost falls back to the Google host rather
+            # than issuing a request that could never succeed.
+            base_endpoint=(
+                endpoint
+                if endpoint and "localhost" not in endpoint
+                else DEFAULT_ENDPOINT
+            ),
+        )
     raise ValueError(f"Unknown LLM review provider: {config.provider!r}")

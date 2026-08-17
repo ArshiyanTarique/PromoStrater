@@ -8,6 +8,7 @@ in that table and therefore cannot develop misaligned lists.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,10 +19,19 @@ import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz, process
 
+from sku_mapping.competitors.policy import DECISION_COLUMNS
+from sku_mapping.competitors.text_normalisation import (
+    COMPETITOR_TOKEN_ALIASES,
+    strip_competitor_brand,
+)
 from sku_mapping.config import CompetitorConfig
 from sku_mapping.data.preprocessing import normalize_product_family
 from sku_mapping.features.measurement_features import pack_is_compatible
-from sku_mapping.features.semantic_features import _family_set, _protein_set
+from sku_mapping.features.semantic_features import (
+    _family_concept_set,
+    _family_set,
+    _protein_set,
+)
 
 COMPETITOR_EXPORT_COLUMNS = (
     "master_sku",
@@ -67,10 +77,27 @@ COMPETITOR_LONG_COLUMNS = (
     "competitor_match_status",
     "competitor_match_reason",
     "competitor_rank",
+    # Diagnostics only. The learned signal is recorded so a reviewer can see
+    # what reordered a list, and is deliberately absent from
+    # COMPETITOR_EXPORT_COLUMNS - the business export states decisions, not
+    # model internals. The score is a raw margin, comparable only within one
+    # offer's shortlist; see competitors.reranker.
+    "competitor_lightgbm_score",
+    "competitor_lightgbm_rank",
+    "competitor_ranking_source",
     "run_id",
+    # The terminal automatic verdict. Always present so the audit contract does
+    # not change shape with configuration: when automatic decisions are off the
+    # three columns are empty rather than absent, which kept the export
+    # validator and this tuple in agreement.
+    "competitor_decision",
+    "competitor_decision_reason",
+    "competitor_decision_source",
 )
 
 SUPPORTED_COMPETITOR_STATUSES = frozenset({"MATCHED", "AMBIGUOUS"})
+
+LOGGER = logging.getLogger(__name__)
 COMPETITOR_EVALUATION_CHUNK_SIZE = 10_000
 CompetitorProgressCallback = Callable[[int, int, int, int, str], None]
 
@@ -154,6 +181,9 @@ def _target_reason(
         messages = {
             "PROTEIN_CONFLICT": "all competitor candidates had protein conflicts",
             "FAMILY_CONFLICT": "all competitor candidates had family conflicts",
+            "FORM_CONFLICT": (
+                "all competitor candidates were a different product form"
+            ),
             "PACK_CONFLICT": "all competitor candidates had pack conflicts",
             "PRODUCT_FAMILY_CONFLICT": (
                 "no compatible competitor offer in upload; "
@@ -189,17 +219,10 @@ def _canonical_sources(prepared_offers: pd.DataFrame) -> pd.DataFrame:
     return canonical
 
 
-#: Transliterations of the same product word. ClickFlyer carries retailer copy
-#: verbatim, so the same item appears as "Sambosa" or "Samosa" depending on who
-#: wrote the flyer, and a token-based ratio treats those as unrelated words.
-#: Applied to competitor scoring text only - own-brand mapping is untouched.
-_COMPETITOR_TOKEN_ALIASES = {
-    "sambosa": "samosa",
-    "sambosas": "samosa",
-    "samboosa": "samosa",
-    "sambousa": "samosa",
-    "samosas": "samosa",
-}
+#: Re-exported so existing call sites and tests keep resolving. The table and
+#: the stripping rule now live in :mod:`competitors.text_normalisation`, which
+#: the ML re-ranker shares - see that module for why competitors need it.
+_COMPETITOR_TOKEN_ALIASES = COMPETITOR_TOKEN_ALIASES
 
 
 def _canonical_competitors(prepared_offers: pd.DataFrame) -> pd.DataFrame:
@@ -247,20 +270,14 @@ def _competitor_match_text(pool: pd.DataFrame) -> pd.Series:
     A brand token that also appears in the row's ``Product`` is kept - it is
     carrying product meaning, not just branding.
     """
-    texts = pool["match_text"].map(_safe_text).str.lower()
-    brands = pool["Brand Name"].map(_safe_text).str.lower()
-    products = pool["Product"].map(_safe_text).str.lower()
+    texts = pool["match_text"].map(_safe_text)
+    brands = pool["Brand Name"].map(_safe_text)
+    products = pool["Product"].map(_safe_text)
 
-    cleaned: list[str] = []
-    for text, brand, product in zip(texts, brands, products):
-        brand_tokens = set(brand.replace("-", " ").split())
-        protected = set(product.replace("-", " ").split())
-        tokens = [
-            _COMPETITOR_TOKEN_ALIASES.get(token, token)
-            for token in text.split()
-            if token not in brand_tokens or token in protected
-        ]
-        cleaned.append(" ".join(tokens))
+    cleaned = [
+        strip_competitor_brand(text, brand, protected=product)
+        for text, brand, product in zip(texts, brands, products)
+    ]
     return pd.Series(cleaned, index=pool.index, dtype="object")
 
 
@@ -294,6 +311,15 @@ def _master_profiles(product_master: pd.DataFrame) -> pd.DataFrame:
     profiles["_business_families"] = profiles[
         "_business_target_text"
     ].map(_family_set)
+    # The product form the SKU actually *is*, read from its own name rather
+    # than from _business_target_text. The wider text carries the merchandising
+    # sub-category too - CCF's is "POP-CORN & CHICKEN FRIES" - which would make
+    # a chicken fries SKU claim popcorn as one of its own forms.
+    profiles["_business_form"] = profiles.apply(
+        lambda row: _family_concept_set(_safe_text(row.get("Itemname")))
+        or _family_concept_set(_safe_text(row.get("Item-Cat-4"))),
+        axis=1,
+    )
     return profiles
 
 
@@ -359,12 +385,47 @@ def _evaluate_target(
             )
         )
     )
-    status.loc[protein_conflict | family_conflict] = "HARD_CONFLICT"
+    # A competitor must sell the same product form. Chicken fries compete with
+    # chicken fries, not with nuggets, strips, fillets or popcorn, even though
+    # those share a protein and a category. The family sets above cannot make
+    # that call: they read the whole offer name, so a bundle that merely lists
+    # chicken fries among four products intersects the target and passes.
+    #
+    # Both sides must name a form for the rule to apply. A SKU or a Product
+    # entry with no recognised form phrase is left to the checks above rather
+    # than being excluded on an absence of evidence.
+    target_forms = target.get("_business_form") or set()
+    context_forms = (
+        context["_business_form"]
+        if "_business_form" in context
+        else context["Product"].map(
+            lambda value: _family_concept_set(_safe_text(value))
+        )
+    )
+    form_conflict = (
+        semantic_candidates
+        & ~protein_conflict
+        & ~family_conflict
+        & context_forms.map(
+            lambda values: bool(
+                target_forms
+                and values
+                and not set(target_forms).intersection(values)
+            )
+        )
+    )
+    status.loc[protein_conflict | family_conflict | form_conflict] = (
+        "HARD_CONFLICT"
+    )
     reason.loc[protein_conflict] = "PROTEIN_CONFLICT"
     reason.loc[family_conflict] = "FAMILY_CONFLICT"
+    reason.loc[form_conflict] = "FORM_CONFLICT"
 
     eligible_indices = context.index[
-        semantic_candidates & ~protein_conflict & ~family_conflict
+        semantic_candidates
+        & ~protein_conflict
+        & ~family_conflict
+        & ~form_conflict
     ]
     raw_score = pd.Series(np.nan, index=context.index, dtype=float)
     adjusted_score = pd.Series(np.nan, index=context.index, dtype=float)
@@ -469,28 +530,237 @@ def _evaluate_target(
             "competitor_match_status": status,
             "competitor_match_reason": reason,
             "competitor_rank": None,
+            # Every row states how it was ordered, including the ones the
+            # rules settled before any model was consulted. A blank here
+            # would read as "unknown" when the answer is "rules decided it".
+            "competitor_lightgbm_score": None,
+            "competitor_lightgbm_rank": None,
+            "competitor_ranking_source": "rules",
             "run_id": run_id,
         },
         columns=COMPETITOR_LONG_COLUMNS,
     )
 
     if retained_ranks is not None:
-        supported = evaluation["competitor_match_status"].isin(
-            SUPPORTED_COMPETITOR_STATUSES
-        )
-        supported_offer_ids = evaluation.loc[
-            supported, "competitor_offer_id"
-        ].map(_safe_text)
-        retained = supported & supported_offer_ids.isin(retained_ranks)
-        limited = supported & ~retained
-        evaluation.loc[limited, "competitor_match_status"] = "EXCLUDED"
-        evaluation.loc[
-            limited, "competitor_match_reason"
-        ] = "BELOW_MAX_PER_TARGET_LIMIT"
-        evaluation.loc[retained, "competitor_rank"] = (
-            supported_offer_ids.loc[retained].map(retained_ranks)
-        )
+        return _apply_retained_ranks(evaluation, retained_ranks)
     return evaluation
+
+
+def _apply_retained_ranks(
+    evaluation: pd.DataFrame, retained_ranks: Mapping[str, int]
+) -> pd.DataFrame:
+    """Stamp ranks and demote anything past the per-target limit.
+
+    Extracted so the single-pass caller and :func:`_evaluate_target`'s own
+    ``retained_ranks`` argument cannot diverge on what a rank means.
+    """
+    if evaluation.empty:
+        return evaluation
+    supported = evaluation["competitor_match_status"].isin(
+        SUPPORTED_COMPETITOR_STATUSES
+    )
+    supported_offer_ids = evaluation.loc[
+        supported, "competitor_offer_id"
+    ].map(_safe_text)
+    retained = supported & supported_offer_ids.isin(retained_ranks)
+    limited = supported & ~retained
+    evaluation.loc[limited, "competitor_match_status"] = "EXCLUDED"
+    evaluation.loc[
+        limited, "competitor_match_reason"
+    ] = "BELOW_MAX_PER_TARGET_LIMIT"
+    evaluation.loc[retained, "competitor_rank"] = (
+        supported_offer_ids.loc[retained].map(retained_ranks)
+    )
+    return evaluation
+
+
+#: Ranking keys for ML-scored rows are lifted into a band above every possible
+#: fuzzy score (0-100), so a candidate the model has an opinion about always
+#: orders ahead of one it never saw, while both keep a stable internal order.
+_ML_RANK_BAND = 1000.0
+
+
+@dataclass
+class _MLContext:
+    """Per-offer candidate shortlists and their model ordering.
+
+    The model is a WITHIN-OFFER ranker: its group-relative features describe
+    one offer against its own shortlist. Competitor discovery loops the other
+    way round - one master SKU against many offers - so a shortlist is built
+    here per competitor offer, using the same category-gated RapidFuzz
+    generator and the same top-K the model was trained against, and cached so
+    an offer that is a candidate for several targets is featurised once.
+    """
+
+    reranker: Any
+    generator: Any
+    master_lookup: Mapping[str, Any]
+    top_k: int
+    cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    offers_ranked: int = 0
+    pairs_scored: int = 0
+
+    def warm(self, offers: list[tuple[str, Any]]) -> None:
+        """Build and score every missing shortlist in one batch.
+
+        Retrieval and inference are both batch operations; driving them one
+        offer at a time spends nearly all of its time on per-call overhead
+        rather than on the work. Measured on an 8k-row slice, per-offer calls
+        cost 17.7x the rules alone - almost none of it in the model.
+        """
+        pending = [
+            (offer_id, offer_row)
+            for offer_id, offer_row in offers
+            if offer_id not in self.cache
+        ]
+        if not pending:
+            return
+        try:
+            shortlists = self.generator.generate_candidates_batch(
+                pd.DataFrame([row for _, row in pending]), top_k=self.top_k
+            )
+            batch: list[tuple[str, Any, list[Any]]] = []
+            for (offer_id, offer_row), candidates in zip(pending, shortlists):
+                master_rows = [
+                    self.master_lookup[candidate.itemcode]
+                    for candidate in candidates
+                    if candidate.itemcode in self.master_lookup
+                ]
+                batch.append((offer_id, offer_row, master_rows))
+            ranked_by_offer = self.reranker.rank_many(batch)
+        except Exception:
+            # A shortlist that cannot be built is a missing opinion, not a
+            # failed run: the rows keep their rule ordering.
+            LOGGER.warning(
+                "Competitor re-ranking failed for a batch; rule order kept",
+                exc_info=True,
+            )
+            ranked_by_offer = {}
+        for offer_id, _ in pending:
+            ranked = ranked_by_offer.get(offer_id, {})
+            self.cache[offer_id] = ranked
+            self.offers_ranked += 1
+            self.pairs_scored += len(ranked)
+
+    def ranks_for_offer(self, offer_id: str, offer_row: Any) -> dict[str, Any]:
+        cached = self.cache.get(offer_id)
+        if cached is not None:
+            return cached
+        self.warm([(offer_id, offer_row)])
+        return self.cache.get(offer_id, {})
+
+
+def _apply_ml_reranking(
+    frame: pd.DataFrame,
+    *,
+    target: Mapping[str, Any],
+    offer_lookup: Mapping[str, Any],
+    ml_context: "_MLContext | None",
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Attach the model's opinion to rows the rules already admitted.
+
+    Never changes a status and never adds a row. The only thing it can change
+    is ``_ranking_key``, which decides display order and - when
+    ``max_per_target`` is set - which rows survive the cut.
+    """
+    stats = {"offers_ranked": 0, "pairs_scored": 0, "rows_with_model_score": 0}
+    if frame.empty:
+        return frame, stats
+    frame = frame.copy()
+    fuzzy = pd.to_numeric(
+        frame["competitor_match_score"], errors="coerce"
+    ).fillna(float("-inf"))
+    if ml_context is None:
+        frame["competitor_lightgbm_score"] = None
+        frame["competitor_lightgbm_rank"] = None
+        frame["competitor_ranking_source"] = "rules"
+        frame["_ranking_key"] = fuzzy
+        return frame, stats
+
+    master_sku = _safe_text(target.get("_business_master_sku"))
+    scores: list[float | None] = []
+    ranks: list[int | None] = []
+    before = (ml_context.offers_ranked, ml_context.pairs_scored)
+    # Warm the whole target's offers at once. Offers already seen for an
+    # earlier target are skipped, so the cost falls on distinct offers.
+    ml_context.warm(
+        [
+            (offer_id, offer_lookup[offer_id])
+            for offer_id in dict.fromkeys(
+                frame["competitor_offer_id"].map(_safe_text)
+            )
+            if offer_id in offer_lookup
+        ]
+    )
+    for offer_id in frame["competitor_offer_id"].map(_safe_text):
+        offer_row = offer_lookup.get(offer_id)
+        if offer_row is None:
+            scores.append(None)
+            ranks.append(None)
+            continue
+        ranked = ml_context.ranks_for_offer(offer_id, offer_row)
+        entry = ranked.get(master_sku)
+        scores.append(None if entry is None else float(entry.raw_margin))
+        ranks.append(None if entry is None else int(entry.rank))
+    frame["competitor_lightgbm_score"] = scores
+    frame["competitor_lightgbm_rank"] = ranks
+    has_score = pd.Series([score is not None for score in scores], index=frame.index)
+    frame["competitor_ranking_source"] = np.where(has_score, "lightgbm", "rules")
+    margins = pd.Series(
+        [0.0 if score is None else float(score) for score in scores],
+        index=frame.index,
+    )
+    frame["_ranking_key"] = np.where(
+        has_score, _ML_RANK_BAND + margins, fuzzy
+    )
+    stats["offers_ranked"] = ml_context.offers_ranked - before[0]
+    stats["pairs_scored"] = ml_context.pairs_scored - before[1]
+    stats["rows_with_model_score"] = int(has_score.sum())
+    return frame, stats
+
+
+def _accumulate(totals: dict[str, float], additions: Mapping[str, float]) -> None:
+    for key, value in additions.items():
+        totals[key] = totals.get(key, 0) + value
+
+
+def _build_ml_context(
+    reranker: Any,
+    product_master: pd.DataFrame,
+    config: CompetitorConfig | None = None,
+) -> "_MLContext | None":
+    """Pair a re-ranker with the production shortlist generator.
+
+    The shortlist comes from :class:`CandidateGenerator` - the same
+    category-gated RapidFuzz retrieval the own-brand pipeline uses and the
+    model was trained against - so the candidate groups the model sees here
+    have the shape it was fitted on. Top-K defaults to the package's own
+    ``retrieval_k`` rather than a number chosen here.
+    """
+    try:
+        from sku_mapping.matching.candidate_generator import CandidateGenerator
+
+        master = product_master.reset_index(drop=True)
+        generator = CandidateGenerator(master)
+        master_lookup = {
+            _safe_text(row["Itemcode"]): row for _, row in master.iterrows()
+        }
+        # Configured K wins; 0 defers to the package's own retrieval_k, which
+        # is the group size the model was fitted against. Falling back to 20
+        # only matters for a package that declares none.
+        configured = int(getattr(config, "ml_shortlist_top_k", 0) or 0)
+        top_k = configured or int(getattr(reranker, "retrieval_k", 0) or 0) or 20
+        return _MLContext(
+            reranker=reranker,
+            generator=generator,
+            master_lookup=master_lookup,
+            top_k=top_k,
+        )
+    except Exception:
+        LOGGER.warning(
+            "Could not build the competitor shortlist generator", exc_info=True
+        )
+        return None
 
 
 def _retained_ranks(
@@ -633,6 +903,8 @@ def discover_competitors(
     audit_path: str | Path | None = None,
     progress: CompetitorProgressCallback | None = None,
     competitor_offers: pd.DataFrame | None = None,
+    reranker: Any | None = None,
+    adjudicator: Any | None = None,
 ) -> CompetitorDiscoveryResult:
     """Discover exact dump competitors for distinct mapped Master SKUs.
 
@@ -647,6 +919,11 @@ def discover_competitors(
     only the first variant - in practice the ``No Variant`` row - hiding the
     variant that carries the protein evidence.  Own-brand source evidence is
     always taken from ``prepared_offers`` so mapping traceability is unchanged.
+
+    ``reranker`` is optional. When supplied it reorders candidates the rules
+    have already admitted - it cannot admit, reject, or override a conflict.
+    When absent (the default) the rules order the list exactly as before, so
+    the pre-ML behaviour is what a caller gets by not passing anything.
     """
 
     _require_columns(
@@ -701,12 +978,37 @@ def discover_competitors(
         + " "
         + competitor_pool["Product"].map(_safe_text)
     ).map(_family_set)
+    # Form is read from ``Product`` alone - the offer's primary item - and not
+    # from the offer name. A combo flyer ("Chicken Nuggets/Popcorn/Fries/
+    # Fillet 400gm x2") names several products, so the offer name reports every
+    # form in the bundle and cannot say which one the offer is for.
+    competitor_pool["_business_form"] = competitor_pool["Product"].map(
+        lambda value: _family_concept_set(_safe_text(value))
+    )
     category_indices = {
         _safe_text(category): list(indices)
         for category, indices in competitor_pool.groupby(
             "category", sort=False
         ).groups.items()
     }
+
+    # Model wiring. Built once and shared by every target: an offer that is a
+    # candidate for several master SKUs is featurised on its first appearance
+    # and read from the cache afterwards, which is what keeps the ML cost
+    # proportional to distinct supported offers rather than to relationships.
+    ml_context: _MLContext | None = None
+    ml_diagnostics: dict[str, float] = {}
+    if reranker is not None:
+        ml_context = _build_ml_context(reranker, product_master, config)
+        if ml_context is None:
+            LOGGER.warning(
+                "Competitor re-ranker supplied but no shortlist generator "
+                "could be built; continuing on rule ordering"
+            )
+    offer_lookup = {
+        _safe_text(row["_business_offer_id"]): row
+        for _, row in competitor_pool.iterrows()
+    } if ml_context is not None else {}
 
     mappings = sku_mapping.copy()
     mappings["_business_master_sku"] = mappings[
@@ -795,58 +1097,14 @@ def discover_competitors(
             )
         supported_rows: list[tuple[float, str]] = []
 
-        for start in range(
-            0, len(target_pool), COMPETITOR_EVALUATION_CHUNK_SIZE
-        ):
-            chunk = target_pool.iloc[
-                start : start + COMPETITOR_EVALUATION_CHUNK_SIZE
-            ]
-            initial = _evaluate_target(
-                target=target,
-                source_evidence=source_evidence,
-                competitor_pool=chunk,
-                config=config,
-                run_id=run_id,
-            )
-            supported = initial["competitor_match_status"].isin(
-                SUPPORTED_COMPETITOR_STATUSES
-            )
-            supported_rows.extend(
-                (
-                    float(score),
-                    _safe_text(offer_id),
-                )
-                for score, offer_id in zip(
-                    pd.to_numeric(
-                        initial.loc[
-                            supported, "competitor_match_score"
-                        ],
-                        errors="coerce",
-                    ).fillna(float("-inf")),
-                    initial.loc[supported, "competitor_offer_id"],
-                )
-            )
-            for reason, count in (
-                initial.loc[
-                    ~supported, "competitor_match_reason"
-                ].value_counts()
-            ).items():
-                target_reason_counts[str(reason)] = (
-                    target_reason_counts.get(str(reason), 0) + int(count)
-                )
-
-        ranks = _retained_ranks(supported_rows, config.max_per_target)
-        limited_count = max(0, len(supported_rows) - len(ranks))
-        if limited_count:
-            target_reason_counts["BELOW_MAX_PER_TARGET_LIMIT"] = (
-                target_reason_counts.get(
-                    "BELOW_MAX_PER_TARGET_LIMIT", 0
-                )
-                + limited_count
-            )
-
-        retained_frames: list[pd.DataFrame] = []
-        target_frames: list[pd.DataFrame] = []
+        # ONE evaluation pass. Every relationship used to be scored twice -
+        # once to collect the scores that decide ranks, once to emit rows -
+        # which doubled the cost of the most expensive stage in the run. Only
+        # supported rows can be changed by a rank, so unsupported rows are
+        # final the moment they are produced and go straight out; the far
+        # smaller supported set is held back until ranks are known.
+        settled_frames: list[pd.DataFrame] = []
+        pending_supported: list[pd.DataFrame] = []
         for start in range(
             0, len(target_pool), COMPETITOR_EVALUATION_CHUNK_SIZE
         ):
@@ -859,23 +1117,41 @@ def discover_competitors(
                 competitor_pool=chunk,
                 config=config,
                 run_id=run_id,
-                retained_ranks=ranks,
             )
-            retained = evaluated[
-                evaluated["competitor_match_status"].isin(
-                    SUPPORTED_COMPETITOR_STATUSES
+            supported = evaluated["competitor_match_status"].isin(
+                SUPPORTED_COMPETITOR_STATUSES
+            )
+            supported_rows.extend(
+                (
+                    float(score),
+                    _safe_text(offer_id),
                 )
-            ]
-            if not retained.empty:
-                retained_frames.append(retained)
-                supported_row_count += len(retained)
-                supported_offer_ids.update(
-                    retained["competitor_offer_id"].map(_safe_text)
+                for score, offer_id in zip(
+                    pd.to_numeric(
+                        evaluated.loc[
+                            supported, "competitor_match_score"
+                        ],
+                        errors="coerce",
+                    ).fillna(float("-inf")),
+                    evaluated.loc[supported, "competitor_offer_id"],
                 )
-            if audit_output is None:
-                target_frames.append(evaluated)
-            else:
-                _append_audit_frame(evaluated, audit_output)
+            )
+            for reason, count in (
+                evaluated.loc[
+                    ~supported, "competitor_match_reason"
+                ].value_counts()
+            ).items():
+                target_reason_counts[str(reason)] = (
+                    target_reason_counts.get(str(reason), 0) + int(count)
+                )
+            if supported.any():
+                pending_supported.append(evaluated.loc[supported])
+            settled = evaluated.loc[~supported]
+            if not settled.empty:
+                if audit_output is None:
+                    settled_frames.append(settled)
+                else:
+                    _append_audit_frame(settled, audit_output)
             # Emit a sub-SKU heartbeat so the dashboard bar moves even
             # when a single target SKU has a very large competitor pool.
             if progress is not None:
@@ -888,6 +1164,62 @@ def discover_competitors(
                     code,
                 )
 
+        supported_frame = (
+            pd.concat(pending_supported, ignore_index=True)
+            if pending_supported
+            else pd.DataFrame(columns=COMPETITOR_LONG_COLUMNS)
+        )
+        # The learned signal enters HERE and only here: it reorders the rows
+        # the rules already admitted. It cannot add a row, and the ordering it
+        # produces feeds the same max_per_target cut the fuzzy order fed.
+        supported_frame, ml_stats = _apply_ml_reranking(
+            supported_frame,
+            target=target,
+            offer_lookup=offer_lookup,
+            ml_context=ml_context,
+        )
+        _accumulate(ml_diagnostics, ml_stats)
+        if ml_context is not None and not supported_frame.empty:
+            supported_rows = [
+                (float(score), _safe_text(offer_id))
+                for score, offer_id in zip(
+                    supported_frame["_ranking_key"],
+                    supported_frame["competitor_offer_id"],
+                )
+            ]
+
+        ranks = _retained_ranks(supported_rows, config.max_per_target)
+        limited_count = max(0, len(supported_rows) - len(ranks))
+        if limited_count:
+            target_reason_counts["BELOW_MAX_PER_TARGET_LIMIT"] = (
+                target_reason_counts.get(
+                    "BELOW_MAX_PER_TARGET_LIMIT", 0
+                )
+                + limited_count
+            )
+
+        supported_frame = _apply_retained_ranks(supported_frame, ranks)
+        supported_frame = supported_frame.drop(
+            columns=["_ranking_key"], errors="ignore"
+        )
+        retained = supported_frame[
+            supported_frame["competitor_match_status"].isin(
+                SUPPORTED_COMPETITOR_STATUSES
+            )
+        ]
+        if not retained.empty:
+            supported_row_count += len(retained)
+            supported_offer_ids.update(
+                retained["competitor_offer_id"].map(_safe_text)
+            )
+        if not supported_frame.empty:
+            if audit_output is None:
+                settled_frames.append(supported_frame)
+            else:
+                _append_audit_frame(supported_frame, audit_output)
+
+        retained_frames = [retained] if not retained.empty else []
+        target_frames = settled_frames
         target_evaluations = (
             pd.concat(target_frames, ignore_index=True)
             if target_frames
@@ -959,6 +1291,46 @@ def discover_competitors(
             .reset_index(drop=True)
         )
 
+    # The terminal stage. Ranking above decides ORDER; this decides OUTCOME,
+    # grouped by competitor offer rather than by target, because "which SKU
+    # does this rival product compete with" has one answer per offer. Off by
+    # configuration leaves every row undecided and the frame unchanged.
+    decision_stats: dict[str, int] = {}
+    if getattr(config, "automatic_decisions_enabled", False):
+        from sku_mapping.competitors.decisions import apply_automatic_decisions
+
+        # The frame is built against COMPETITOR_LONG_COLUMNS, which now carries
+        # the decision columns so the audit contract is config-independent.
+        # apply_automatic_decisions appends its own, so drop the placeholders
+        # first or the frame ends up with each column twice.
+        long_format = long_format.drop(
+            columns=[
+                column
+                for column in (
+                    "competitor_decision",
+                    "competitor_decision_reason",
+                    "competitor_decision_source",
+                )
+                if column in long_format.columns
+            ]
+        )
+        long_format, decision_stats = apply_automatic_decisions(
+            long_format,
+            clear_margin=float(getattr(config, "clear_margin_threshold", 0.0)),
+            clear_gap=float(getattr(config, "clear_gap_threshold", 2.0)),
+            adjudicator=adjudicator,
+            max_adjudicated_candidates=int(
+                getattr(config, "llm_max_candidates", 5)
+            ),
+        )
+
+    # Guarantee the audit shape regardless of whether decisions ran, so the
+    # export validator sees one contract instead of two.
+    for column in ("competitor_decision", "competitor_decision_reason",
+                   "competitor_decision_source"):
+        if column not in long_format.columns:
+            long_format[column] = None
+
     source_offer_ids = set(
         competitor_pool["_business_offer_id"].map(_safe_text)
     )
@@ -977,6 +1349,10 @@ def discover_competitors(
                 for code in target_codes
             )
         ),
+        **{
+            f"decision_{key}": int(value)
+            for key, value in decision_stats.items()
+        },
         "matched_competitor_rows": int(supported_row_count),
         "matched_competitor_offer_count": int(
             len(supported_offer_ids)
@@ -996,6 +1372,22 @@ def discover_competitors(
             str(reason): int(count)
             for reason, count in sorted(all_reason_counts.items())
         },
+        # Observability for the learned layer. ``enabled`` false means the run
+        # was pure rules, which is also what every field below reads as zero.
+        "ml_reranking": {
+            "enabled": bool(ml_context is not None),
+            "model_id": (
+                str(getattr(reranker, "model_id", "")) if ml_context else ""
+            ),
+            "shortlist_top_k": int(ml_context.top_k) if ml_context else 0,
+            "offers_ranked": int(ml_diagnostics.get("offers_ranked", 0)),
+            "pairs_scored": int(ml_diagnostics.get("pairs_scored", 0)),
+            "rows_with_model_score": int(
+                ml_diagnostics.get("rows_with_model_score", 0)
+            ),
+            "score_semantics": "raw_margin_within_offer_shortlist",
+            "used_for": "ranking_only",
+        },
     }
     if export["master_sku"].duplicated().any():
         raise ValueError("Competitor aggregate contains duplicate Master SKUs")
@@ -1005,7 +1397,10 @@ def discover_competitors(
         )
     return CompetitorDiscoveryResult(
         export=export,
-        long_format=long_format.loc[:, COMPETITOR_LONG_COLUMNS],
+        # The canonical columns in their canonical order. DECISION_COLUMNS are
+        # part of that tuple now and are always materialised above, so the
+        # audit has one shape whether or not the decision layer ran.
+        long_format=long_format.loc[:, list(COMPETITOR_LONG_COLUMNS)],
         long_format_path=audit_output,
         eligible_target_count=int(len(target_codes)),
         diagnostics=diagnostics,

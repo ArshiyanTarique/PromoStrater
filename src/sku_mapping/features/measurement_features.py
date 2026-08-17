@@ -18,6 +18,15 @@ WEIGHT_UNITS = {
     "g": 1,
     "gm": 1,
     "gms": 1,
+    # The master data spells grams "GRM"; the flyers spell it "gm" or "g".
+    # Without these the master side of a pack comparison parses to nothing,
+    # pack_is_compatible answers None instead of False, and no size conflict
+    # can ever be raised for that SKU - which is how a 550gm competitor came
+    # to sit under a 400 GRM Al Kabeer SKU.
+    "grm": 1,
+    "grms": 1,
+    "gram": 1,
+    "grams": 1,
     "lb": 453.592,
     "lbs": 453.592,
     "oz": 28.3495,

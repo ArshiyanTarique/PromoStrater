@@ -53,13 +53,6 @@ def _config(tmp_path: Path):
             review_staging_directory=tmp_path / "reviews",
             challenge_set_directory=tmp_path / "challenge",
         ),
-        embedding=replace(
-            base.embedding,
-            backend="local_hashing",
-            model_name="sku-hashing-384",
-            model_version="sku-hashing-384-v1",
-            cache_path=tmp_path / "embedding.sqlite3",
-        ),
         llm_review=replace(
             base.llm_review,
             cache_path=tmp_path / "llm.sqlite3",
@@ -160,7 +153,6 @@ def test_assisted_processing_propagates_offer_identity_to_competitors(
             content=_five_offer_csv(),
             deployment_mode=MLDeploymentMode.ASSISTED,
             model_id=MODEL_ID,
-            enable_embedding=True,
         )
     )
 
@@ -276,10 +268,6 @@ def test_mixed_brand_run_preserves_every_terminal_offer_and_proposal(
     assert result.summary["decision_coverage_complete"] is True
     assert result.summary["competitor_offer_count"] == 5
     assert (
-        result.summary["embedding_failure_reason"]
-        == "DISABLED_BY_CONFIGURATION"
-    )
-    assert (
         result.summary["competitor_diagnostics"][
             "source_competitor_offer_count"
         ]
@@ -380,7 +368,6 @@ def test_business_flow_contract_on_current_40_row_fixture(
             content=fixture_path.read_bytes(),
             deployment_mode=MLDeploymentMode.ASSISTED,
             model_id=MODEL_ID,
-            enable_embedding=False,
             enable_llm_review=False,
         )
     )
@@ -494,7 +481,6 @@ def test_business_flow_contract_on_current_40_row_fixture(
         "candidate_generation": "ACTIVE",
         "feature_generation": "ACTIVE",
         "lightgbm": "ACTIVE",
-        "embedding": "DISABLED",
         "llm": "NOT_USED",
         "competitor_discovery": "ACTIVE",
     }
@@ -510,42 +496,6 @@ def test_business_flow_contract_on_current_40_row_fixture(
         store.review_questions(str(session["session_id"]))
     ) == len(mapping)
 
-
-def test_embedding_enabled_40_row_regression_keeps_exact_commercial_skus(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    fixture_path = Path(
-        "tests/fixtures/clickflyer_business_flow_40.csv"
-    )
-    result = DashboardProcessingService(config).process(
-        DashboardProcessRequest(
-            filename="embedding-enabled-40.csv",
-            content=fixture_path.read_bytes(),
-            deployment_mode=MLDeploymentMode.ASSISTED,
-            model_id=MODEL_ID,
-            enable_embedding=True,
-            enable_llm_review=False,
-        )
-    )
-    assert result.summary["embedding_requested"] is True
-    assert result.summary["embedding_available"] is True
-    assert result.summary["embedding_used"] is True
-
-    store = LearningStore(config.learning_store.database_path)
-    artifacts = {
-        artifact.key: artifact
-        for artifact in DashboardRunService(config, store).downloads(
-            result.run_id
-        )
-    }
-    mapping = pd.read_csv(
-        BytesIO(artifacts["sku_mapping"].content),
-        dtype={"source_offer_id": str, "matched_master_sku": str},
-    )
-    selected = mapping.set_index("source_offer_id")["matched_master_sku"]
-    assert selected.loc["28191823"] == "CKN400"
-    assert selected.loc["31862126"] == "CKSA"
 
 
 def test_upload_processing_source_has_no_retraining_calls() -> None:

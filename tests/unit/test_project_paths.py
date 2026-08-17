@@ -48,7 +48,6 @@ def test_default_runtime_paths_are_inside_project_root() -> None:
         config.retraining.snapshot_directory,
         config.retraining.challenger_directory,
         config.retraining.comparison_report_directory,
-        config.embedding.cache_path,
         config.llm_review.cache_path,
         config.learning_store.database_path,
         config.learning_store.csv_export_directory,

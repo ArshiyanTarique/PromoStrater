@@ -87,54 +87,26 @@ def _one(frame: pd.DataFrame, config=None):
     ).results[0]
 
 
-def test_safe_agreement_routes_to_review_when_auto_influence_unapproved() -> None:
-    result = _one(_candidates(probability=0.85))
-    assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
-    assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
-    assert "EMBEDDING_AUTO_INFLUENCE_DISABLED" in result.routing_reason
-    assert result.same_top_candidate is True
-    assert result.lightgbm_top_candidate == "SKU-A"
-    assert result.embedding_top_candidate == "SKU-A"
-    assert result.lightgbm_top_rank == 1
-    assert result.embedding_rank == 1
-    assert result.lightgbm_score_margin == 0.55
-    assert result.embedding_score_margin == pytest.approx(0.30)
-    assert result.candidate_generation_margin == 9.0
-
-
-def test_explicitly_approved_embedding_can_route_safe_agreement_to_auto() -> None:
-    result = _one(
-        _candidates(probability=0.85),
-        replace(_config(), allow_embedding_auto_accept=True),
-    )
-    assert result.agreement_status is AgreementStatus.SAFE_AGREEMENT
-    assert result.routing_decision is ReviewRoute.AUTO_ACCEPT
 
 
 def test_exact_commercial_candidate_precedes_higher_scoring_adapted() -> None:
+    """Commercial preference still outranks raw score, with one scorer."""
     frame = _candidates(probability=0.99)
     frame.loc[0, "commercial_outcome"] = "ADAPTED_MATCH"
     frame.loc[1, "commercial_outcome"] = "EXACT_MATCH"
     frame.loc[1, "calibrated_probability"] = 0.80
-    frame.loc[0, "embedding_similarity"] = 0.99
-    frame.loc[1, "embedding_similarity"] = 0.50
     result = _one(frame)
     assert result.lightgbm_top_candidate == "SKU-B"
-    assert result.embedding_top_candidate == "SKU-B"
+    # 0.80 is below the configured bar, so the exact candidate is reviewed
+    # rather than accepted - preference decides WHICH candidate, the threshold
+    # decides whether it is accepted.
     assert result.routing_decision is ReviewRoute.LLM_REVIEW
 
 
-def test_different_top_candidates_route_to_llm_review() -> None:
-    result = _one(_candidates(same_top=False))
-    assert result.agreement_status is AgreementStatus.DISAGREEMENT
-    assert result.routing_decision is ReviewRoute.LLM_REVIEW
-    assert result.same_top_candidate is False
-    assert "DIFFERENT_TOP_CANDIDATE" in result.routing_reason
 
-
-def test_same_top_below_lightgbm_threshold_routes_to_llm_review() -> None:
+def test_below_lightgbm_threshold_routes_to_llm_review() -> None:
     result = _one(_candidates(probability=0.849999))
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.LLM_REVIEW
     assert "LIGHTGBM_BELOW_THRESHOLD" in result.routing_reason
 
@@ -143,22 +115,68 @@ def test_hard_conflict_routes_to_manual_review_even_with_high_scores() -> None:
     result = _one(
         _candidates(probability=0.99, hard_conflict=True)
     )
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
     assert result.conflict_flags["protein_conflict"] is True
     assert "HARD_CONFLICT" in result.routing_reason
 
 
-def test_embedding_unavailable_is_never_false_agreement() -> None:
+def test_ml_only_is_never_reported_as_agreement() -> None:
+    """One scorer must never be dressed up as two.
+
+    The original protection this test carried - a missing second scorer may
+    not become false corroboration - still holds. What changed is that the
+    absence of a second scorer no longer blocks a decision.
+    """
     result = _one(_candidates(embedding_unavailable=True))
-    assert (
-        result.agreement_status
-        is AgreementStatus.EMBEDDING_UNAVAILABLE
-    )
-    assert result.routing_decision is ReviewRoute.SAFE_FALLBACK
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.agreement_status not in {
+        AgreementStatus.SAFE_AGREEMENT,
+        AgreementStatus.WEAK_AGREEMENT,
+    }
     assert result.same_top_candidate is False
-    assert result.embedding_top_candidate is None
-    assert "EMBEDDING_UNAVAILABLE" in result.routing_reason
+    # A one-scorer result exposes no second-scorer fields at all.
+    assert not hasattr(result, "embedding_top_candidate")
+    assert not hasattr(result, "embedding_similarity")
+
+
+def test_ml_only_high_confidence_auto_accepts() -> None:
+    """Above the configured bar the model decides on its own."""
+    result = _one(_candidates(embedding_unavailable=True, probability=0.99))
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.routing_decision is ReviewRoute.AUTO_ACCEPT
+    assert "LIGHTGBM_BELOW_THRESHOLD" not in result.routing_reason
+
+
+def test_ml_only_low_confidence_routes_to_review() -> None:
+    """Below the bar the candidate is escalated, never silently accepted."""
+    result = _one(_candidates(embedding_unavailable=True, probability=0.10))
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "LIGHTGBM_BELOW_THRESHOLD" in result.routing_reason
+
+
+def test_ml_only_hard_conflict_still_overrides_a_confident_model() -> None:
+    """Confidence must not buy its way past a semantic conflict."""
+    result = _one(
+        _candidates(
+            embedding_unavailable=True, hard_conflict=True, probability=0.99
+        )
+    )
+    assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "HARD_CONFLICT" in result.routing_reason
+
+
+def test_ml_only_missing_master_never_auto_accepts() -> None:
+    """A candidate that is not in the master cannot be a mapping."""
+    result = _one(
+        _candidates(
+            embedding_unavailable=True, missing_master=True, probability=0.99
+        )
+    )
+    assert result.routing_decision is not ReviewRoute.AUTO_ACCEPT
+    assert "MASTER_SKU_MISSING" in result.routing_reason
 
 
 def test_lightgbm_unavailable_routes_to_safe_fallback() -> None:
@@ -171,18 +189,11 @@ def test_lightgbm_unavailable_routes_to_safe_fallback() -> None:
 
 def test_missing_master_routes_to_manual_review() -> None:
     result = _one(_candidates(missing_master=True))
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
+    assert result.agreement_status is AgreementStatus.LIGHTGBM_ONLY
     assert result.routing_decision is ReviewRoute.MANUAL_REVIEW
     assert result.conflict_flags["missing_master"] is True
     assert "MASTER_SKU_MISSING" in result.routing_reason
 
-
-def test_optional_embedding_margin_is_not_invented_but_is_enforced_if_set() -> None:
-    config = replace(_config(), minimum_embedding_margin=0.40)
-    result = _one(_candidates(), config=config)
-    assert result.agreement_status is AgreementStatus.WEAK_AGREEMENT
-    assert result.routing_decision is ReviewRoute.LLM_REVIEW
-    assert "WEAK_EMBEDDING_MARGIN" in result.routing_reason
 
 
 def test_multiple_offers_produce_one_explicit_result_each() -> None:
@@ -205,12 +216,8 @@ def test_multiple_offers_produce_one_explicit_result_each() -> None:
         "lightgbm_top_candidate",
         "lightgbm_calibrated_probability",
         "lightgbm_top_rank",
-        "embedding_top_candidate",
-        "embedding_similarity",
-        "embedding_rank",
         "same_top_candidate",
         "lightgbm_score_margin",
-        "embedding_score_margin",
         "conflict_flags",
         "agreement_status",
         "routing_decision",

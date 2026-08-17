@@ -137,10 +137,6 @@ if not alternatives.empty:
             formatted_alt["Confidence"] = formatted_alt["lightgbm_probability"].apply(
                 lambda p: f"{float(p):.1%}" if pd.notnull(p) else "N/A"
             )
-        if "embedding_similarity" in formatted_alt:
-            formatted_alt["Similarity"] = formatted_alt["embedding_similarity"].apply(
-                lambda s: f"{float(s):.3f}" if pd.notnull(s) else "N/A"
-            )
         
         st.dataframe(
             formatted_alt[
@@ -149,7 +145,6 @@ if not alternatives.empty:
                     "candidate_id",
                     "candidate_description",
                     "Confidence",
-                    "Similarity",
                 ]
             ],
             hide_index=True,

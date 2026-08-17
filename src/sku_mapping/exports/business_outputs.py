@@ -378,6 +378,8 @@ def build_business_outputs(
     ) = None,
     stage_progress: Callable[[str, int, int, str], None] | None = None,
     competitor_offers: pd.DataFrame | None = None,
+    competitor_reranker: Any | None = None,
+    competitor_adjudicator: Any | None = None,
 ) -> BusinessOutputResult:
     """Build the exact own-offer → master-SKU → competitor business flow.
 
@@ -409,6 +411,8 @@ def build_business_outputs(
         audit_path=competitor_audit_path,
         progress=competitor_progress,
         competitor_offers=competitor_offers,
+        reranker=competitor_reranker,
+        adjudicator=competitor_adjudicator,
     )
     canonical_offer_count = int(
         prepared_offers["offer_group_id"].nunique(dropna=True)

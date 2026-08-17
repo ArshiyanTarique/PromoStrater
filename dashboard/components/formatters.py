@@ -17,12 +17,6 @@ KNOWN_ENUM_LABELS: dict[str, str] = {
     "SHADOW_MODE_ONLY": "Shadow Evaluation Only",
     "NOT_APPROVED_FOR_AUTOMATIC_MATCHING": "Not Approved For Auto Match",
     
-    # Embedding Statuses & Fallbacks
-    "EMBEDDING_FAILURE_SAFE_FALLBACK": "Embedding Fallback",
-    "EMBEDDING_UNAVAILABLE": "Embedding Unavailable",
-    "EMBEDDING_DISABLED": "Embedding Disabled",
-    "EMBEDDING_LOAD_FAILED": "Embedding Load Failed",
-    "EMBEDDING_RUNTIME_FAILED": "Embedding Runtime Failed",
     "NOT_EXERCISED": "Not Exercised",
     "ACTIVE": "Active / Used",
     "USED": "Used in Run",
@@ -79,7 +73,6 @@ STATUS_COLOR_MAP: dict[str, str] = {
     "MANUAL_REVIEW": "warning",
     "SHADOW_MODE_ONLY": "warning",
     "NOT_APPROVED_FOR_AUTOMATIC_MATCHING": "warning",
-    "EMBEDDING_FAILURE_SAFE_FALLBACK": "warning",
     "NOT_EXERCISED": "warning",
     "PROCESSING": "info",
     "VALIDATING": "info",
@@ -88,9 +81,6 @@ STATUS_COLOR_MAP: dict[str, str] = {
     "MODEL_ERROR": "error",
     "FAILED": "error",
     "FAILED_DASHBOARD": "error",
-    "EMBEDDING_UNAVAILABLE": "error",
-    "EMBEDDING_LOAD_FAILED": "error",
-    "EMBEDDING_RUNTIME_FAILED": "error",
     "DISABLED": "neutral",
     "IDLE": "neutral",
     "UNAVAILABLE": "error",
@@ -118,20 +108,6 @@ def get_status_color(value: str | None) -> str:
     return STATUS_COLOR_MAP.get(clean, "neutral")
 
 
-def format_embedding_status(status: str | None, failure_reason: str | None = None) -> tuple[str, str]:
-    """Return readable label and color category for embedding status."""
-    if not status:
-        return "Disabled", "neutral"
-    
-    clean = str(status).upper()
-    label = format_enum_label(clean)
-    if failure_reason:
-        label += f" ({failure_reason})"
-        
-    color = get_status_color(clean)
-    return label, color
-
-
 def format_elapsed(seconds: float) -> str:
     """Format a duration identically wherever elapsed time is shown.
 
@@ -139,11 +115,9 @@ def format_elapsed(seconds: float) -> str:
     run, so they must not disagree on wording - one reading "84s" beside the
     other reading "1m 24s" looks like a sync bug even when the values match.
 
-    Minutes are always printed, including for the first minute. A run's live
-    reading is a CSS counter that cannot change its own shape as it crosses
-    60s (see :mod:`dashboard.components.elapsed_clock`), so a shape that
-    switched would make the clock jump from "59s" to "1m 0s" and back to "45s"
-    when the same run finished.
+    Minutes are always printed, including for the first minute, so the reading
+    keeps one shape for the whole run instead of switching from "59s" to
+    "1m 0s" as it crosses a minute.
     """
     try:
         total = max(0, int(float(seconds)))

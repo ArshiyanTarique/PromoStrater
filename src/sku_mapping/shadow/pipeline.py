@@ -20,7 +20,6 @@ from rapidfuzz import fuzz
 
 from sku_mapping.agreement.policy import evaluate_candidate_agreement
 from sku_mapping.config import (
-    EmbeddingConfig,
     PipelineConfig,
     ShadowModeConfig,
     load_config,
@@ -28,13 +27,6 @@ from sku_mapping.config import (
 from sku_mapping.constants import FEATURE_GENERATOR_VERSION, MODEL_FEATURE_COLUMNS
 from sku_mapping.data.offer_identity import canonical_offer_identity
 from sku_mapping.data.preprocessing import preprocess_product_master
-from sku_mapping.embedding.scorer import (
-    score_candidate_frame_non_blocking,
-)
-from sku_mapping.embedding.retrieval import (
-    EmbeddingRetrievalResult,
-    retrieve_embedding_candidates,
-)
 from sku_mapping.features.commercial_attributes import (
     attributes_json,
     compare_commercial_attributes,
@@ -196,42 +188,6 @@ def _production_accepted(value: object, tier: object) -> bool:
     return str(value) in {"AUTO_MATCH", "ACCEPTED"} or str(tier) == "high (ml)"
 
 
-def _retrieved_candidate(
-    offer: pd.Series,
-    master: pd.Series,
-    *,
-    rank: int,
-) -> CandidateMatch:
-    """Create diagnostics for an embedding-only union candidate."""
-    text_score = (
-        fuzz.token_sort_ratio(offer["match_text"], master["match_text"])
-        + fuzz.token_set_ratio(offer["match_text"], master["match_text"])
-    ) / 2.0
-    pack_status = pack_is_compatible(
-        offer["offer_measures"], master["master_measures"]
-    )
-    adjusted = text_score + (
-        4.0 if pack_status is True else -3.0 if pack_status is None else 0.0
-    )
-    return CandidateMatch(
-        itemcode=str(master["Itemcode"]),
-        itemname=str(master["Itemname"]),
-        text_score=round(float(text_score), 2),
-        adjusted_score=round(float(adjusted), 2),
-        margin=0.0,
-        raw_margin=0.0,
-        pack_status=pack_status,
-        pack_structure_status=pack_structure_agrees(
-            offer["offer_measures_detailed"],
-            master["master_measures_detailed"],
-        ),
-        category=str(offer["category"]),
-        candidate_rank=rank,
-        master_match_text=str(master["match_text"]),
-        master_measures=tuple(master["master_measures"]),
-    )
-
-
 @dataclass(frozen=True)
 class _MasterContext:
     """Master-side lookups and the candidate generator, built once per run.
@@ -304,14 +260,12 @@ def _build_candidate_features_for_slice(
     shadow_run_id: str,
     timestamp: str,
     registered: RegisteredShadowPackage,
-    embedding_config: EmbeddingConfig,
     progress: InferenceProgressCallback | None = None,
     progress_offset: int = 0,
     progress_total: int | None = None,
 ) -> tuple[
     pd.DataFrame,
     int,
-    EmbeddingRetrievalResult | None,
 ]:
     """Build candidate rows for one already-prepared slice of own-brand offers.
 
@@ -322,7 +276,7 @@ def _build_candidate_features_for_slice(
     the rows produced.
     """
     if own.empty:
-        return pd.DataFrame(), 0, None
+        return pd.DataFrame(), 0
 
     master = master_context.master
     master_lookup = master_context.master_lookup
@@ -352,36 +306,6 @@ def _build_candidate_features_for_slice(
             else None
         ),
     )
-    retrieval_result = retrieve_embedding_candidates(
-        own,
-        master,
-        config=embedding_config,
-    )
-    retrieval_similarity: dict[tuple[int, str], float] = {}
-    if retain_all_candidates:
-        for offer_position, hits in enumerate(retrieval_result.hits):
-            existing = {
-                candidate.itemcode for candidate in ranked[offer_position]
-            }
-            for hit in hits:
-                retrieval_similarity[
-                    (offer_position, hit.master_itemcode)
-                ] = hit.similarity
-                if hit.master_itemcode in existing:
-                    continue
-                master_row = master_lookup.get(hit.master_itemcode)
-                if master_row is None:
-                    continue
-                ranked[offer_position].append(
-                    _retrieved_candidate(
-                        own.iloc[offer_position],
-                        master_row,
-                        rank=len(ranked[offer_position]) + 1,
-                    )
-                )
-                existing.add(hit.master_itemcode)
-                if len(ranked[offer_position]) >= top_k * 2:
-                    break
     rows: list[dict[str, Any]] = []
     failures = 0
     feature_update_interval = max(1, len(ranked) // 100)
@@ -523,26 +447,7 @@ def _build_candidate_features_for_slice(
                         offer.get("Base Packsize", "")
                     ),
                     "candidate_rank": int(candidate.candidate_rank),
-                    "candidate_retrieval_source": (
-                        "FUZZY_AND_EMBEDDING"
-                        if candidate.candidate_rank <= top_k
-                        and (
-                            offer_position,
-                            candidate.itemcode,
-                        )
-                        in retrieval_similarity
-                        else (
-                            "FUZZY"
-                            if candidate.candidate_rank <= top_k
-                            else "EMBEDDING_EXPANSION"
-                        )
-                    ),
-                    "retrieval_embedding_similarity": (
-                        retrieval_similarity.get(
-                            (offer_position, candidate.itemcode),
-                            pd.NA,
-                        )
-                    ),
+                    "candidate_retrieval_source": "FUZZY",
                     "master_itemcode": candidate.itemcode,
                     "master_brand": str(
                         master_row.get("Brand Name", "Al Kabeer")
@@ -650,7 +555,7 @@ def _build_candidate_features_for_slice(
                 f"{progress_offset + completed_offers:,} of "
                 f"{reported_total:,} own-brand offers",
             )
-    return pd.DataFrame(rows), failures, retrieval_result
+    return pd.DataFrame(rows), failures
 
 
 def _build_candidate_features(
@@ -662,12 +567,10 @@ def _build_candidate_features(
     shadow_run_id: str,
     timestamp: str,
     registered: RegisteredShadowPackage,
-    embedding_config: EmbeddingConfig,
     progress: InferenceProgressCallback | None = None,
 ) -> tuple[
     pd.DataFrame,
     int,
-    EmbeddingRetrievalResult | None,
 ]:
     """Build every candidate row in one pass (the legacy, unchunked path)."""
     own = _prepare_own_offers(production_rows)
@@ -681,7 +584,6 @@ def _build_candidate_features(
         shadow_run_id=shadow_run_id,
         timestamp=timestamp,
         registered=registered,
-        embedding_config=embedding_config,
         progress=progress,
     )
 
@@ -739,8 +641,17 @@ def _merge_llm_results(results: list[Any]) -> Any:
             else getattr(first, "error", None)
         ),
         results=combined_results,
+        # Empty chunk frames are dropped before concatenating. A chunk that
+        # reviewed nothing contributes no rows but does contribute its dtypes,
+        # and an empty float column widens an int column it is concatenated
+        # with - so llm_retry_count arrived as 0.0 where a single-pass run
+        # produced 0. Identical values, different dtype, different CSV bytes.
+        # If every chunk is empty the first is kept, so an all-empty merge
+        # still yields the right columns.
         frame=pd.concat(
-            [item.frame for item in results], ignore_index=True
+            [item.frame for item in results if not item.frame.empty]
+            or [results[0].frame],
+            ignore_index=True,
         ),
         offers_routed=sum(int(item.offers_routed or 0) for item in results),
         provider_calls=sum(
@@ -753,18 +664,12 @@ def _merge_llm_results(results: list[Any]) -> Any:
 
 @dataclass
 class _ScoredChunk:
-    """One chunk after prediction, embedding, agreement, and LLM routing."""
+    """One chunk after prediction, agreement, and LLM routing."""
 
     frame: pd.DataFrame
     agreement_frame: pd.DataFrame
     llm_result: Any
-    embedding_result: Any
     stage_runtimes: dict[str, float]
-
-    @property
-    def embedding_status(self) -> str:
-        return str(self.embedding_result.status)
-
 
 def _plan_chunk_edges(
     own: pd.DataFrame, chunk_size: int
@@ -803,7 +708,7 @@ def _score_candidate_chunk(
     predictor: ShadowPredictor,
     config: PipelineConfig,
 ) -> _ScoredChunk:
-    """Apply prediction, embedding, agreement, and LLM routing to one frame.
+    """Apply prediction, agreement, and LLM routing to one frame.
 
     Lifted verbatim from the single-pass implementation so that the chunked and
     legacy paths run identical code. Every stage here is per-offer-group
@@ -843,59 +748,13 @@ def _score_candidate_chunk(
     stage_runtimes["lightgbm_scoring"] = time.perf_counter() - stage_started
 
     stage_started = time.perf_counter()
-    embedding_result = score_candidate_frame_non_blocking(
-        candidate_frame,
-        config=config.embedding,
-    )
-    embedding_scores = embedding_result.scores
-    if embedding_scores.empty and len(candidate_frame):
-        embedding_scores = pd.DataFrame(
-            {
-                "embedding_status": embedding_result.status,
-                "embedding_model_id": (
-                    f"{config.embedding.backend}:"
-                    f"{config.embedding.model_name}"
-                ),
-                "embedding_model_version": (
-                    config.embedding.model_version or "NOT_LOADED"
-                ),
-                "offer_text_used": "",
-                "candidate_text_used": "",
-                "embedding_similarity": float("nan"),
-                "embedding_rank": pd.array(
-                    [pd.NA] * len(candidate_frame), dtype="Int64"
-                ),
-                "embedding_top_candidate": False,
-                "embedding_failure_reason": (
-                    "DISABLED_BY_CONFIGURATION"
-                    if embedding_result.status == "DISABLED"
-                    else embedding_result.error or "EMBEDDING_UNAVAILABLE"
-                ),
-            },
-            index=candidate_frame.index,
-        )
-    candidate_frame = pd.concat(
-        [
-            candidate_frame,
-            embedding_scores.reindex(candidate_frame.index),
-        ],
-        axis=1,
-    )
-    stage_runtimes["embedding_scoring"] = time.perf_counter() - stage_started
-
     stage_started = time.perf_counter()
     agreement_result = evaluate_candidate_agreement(
         candidate_frame,
         config=config.agreement,
     )
     agreement_candidate_columns = agreement_result.frame.rename(
-        columns={
-            "embedding_top_candidate": (
-                "agreement_embedding_top_candidate"
-            ),
-            "embedding_similarity": "agreement_embedding_similarity",
-            "embedding_rank": "agreement_embedding_rank",
-        }
+        columns={}
     )
     candidate_frame = candidate_frame.merge(
         agreement_candidate_columns,
@@ -956,48 +815,121 @@ def _score_candidate_chunk(
         frame=candidate_frame,
         agreement_frame=agreement_result.frame,
         llm_result=llm_review_result,
-        embedding_result=embedding_result,
         stage_runtimes=stage_runtimes,
     )
 
 
-def _merge_embedding_results(results: list[Any]) -> Any:
-    """Combine per-chunk embedding results into one run-level view.
+class ChunkSchemaConflictError(ValueError):
+    """Two chunks disagree on a column's type in a way that cannot be unified."""
 
-    Backend identity, status, and device are properties of the configured
-    model and are therefore taken from the first chunk; only the per-run
-    tallies accumulate. With a single chunk this returns that chunk's result
-    unchanged, so the legacy path is unaffected.
+
+def _unified_spool_schema(sources: list["Path"]) -> "Any":
+    """Union every chunk's schema, preferring a concrete type over null.
+
+    Chunks legitimately differ: a chunk containing no reviewed offer writes the
+    review columns as all-null, which parquet records as the ``null`` type,
+    while a chunk that did review something writes them as strings. Neither is
+    wrong, and the merged file has to hold both.
+
+    Null yields to any concrete type because a null-typed column carries no
+    values to lose. Two different concrete types are NOT reconciled here - a
+    silent cast is how real data goes missing - so that case raises with both
+    types and the chunks that produced them.
     """
-    if not results:
-        return None
-    if len(results) == 1:
-        return results[0]
-    first = results[0]
-    failed = next(
-        (item for item in results if str(item.status) != str(first.status)),
-        None,
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    fields: dict[str, pa.Field] = {}
+    origin: dict[str, Path] = {}
+    order: list[str] = []
+    # pandas records its own dtypes in the parquet key-value metadata, and
+    # read_parquet uses them to restore an extension dtype that Arrow alone
+    # cannot express - an all-null Int64 column is indistinguishable from a
+    # float column of NaNs without it. Building a bare pa.schema() discards
+    # that, so a merged chunked file lost dtypes a single-pass file kept. The
+    # metadata is taken from the widest source schema, which is the one that
+    # describes the most columns of the union.
+    metadata = None
+    widest_names: list[str] = []
+    for source in sources:
+        schema = pq.read_schema(source)
+        if len(schema.names) > len(widest_names):
+            widest_names = list(schema.names)
+            metadata = schema.metadata
+        for field in schema:
+            existing = fields.get(field.name)
+            if existing is None:
+                fields[field.name] = field
+                origin[field.name] = source
+                order.append(field.name)
+                continue
+            if existing.type == field.type:
+                continue
+            if pa.types.is_null(existing.type):
+                fields[field.name] = field
+                origin[field.name] = source
+                continue
+            if pa.types.is_null(field.type):
+                continue
+            # Two concrete types. A chunk with no reviewed offer leaves the
+            # numeric review columns all-NaN, which pandas types as double,
+            # while a chunk that reviewed something writes int64 - and
+            # single-pass, seeing both in one frame, produces double for the
+            # same reason. Arrow decides whether such a pair is safely
+            # promotable; this code does not invent a cast of its own.
+            try:
+                promoted = pa.unify_schemas(
+                    [pa.schema([existing]), pa.schema([field])],
+                    promote_options="permissive",
+                )
+            except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError):
+                promoted = None
+            if promoted is not None:
+                fields[field.name] = promoted.field(field.name)
+                continue
+            raise ChunkSchemaConflictError(
+                f"Chunked run cannot merge column {field.name!r}: "
+                f"{existing.type} in {origin[field.name].name} versus "
+                f"{field.type} in {source.name}"
+            )
+    # Column order follows the widest chunk - the one carrying the most
+    # columns - rather than the order columns were first seen. First-seen
+    # order makes the layout depend on WHICH chunk introduced a column, so a
+    # column absent from the early chunks lands at the end and the merged
+    # frame no longer matches a single-pass one. Anything the widest schema
+    # does not mention keeps first-seen order after it.
+    ordered_names = [name for name in widest_names if name in fields]
+    ordered_names += [name for name in order if name not in set(widest_names)]
+    return pa.schema(
+        [fields[name] for name in ordered_names], metadata=metadata
     )
-    return replace(
-        first,
-        status=failed.status if failed is not None else first.status,
-        error=(
-            failed.error
-            if failed is not None and failed.error
-            else first.error
-        ),
-        candidates_scored=sum(
-            int(item.candidates_scored or 0) for item in results
-        ),
-        failures=sum(int(item.failures or 0) for item in results),
-        runtime_seconds=sum(
-            float(item.runtime_seconds or 0.0) for item in results
-        ),
-    )
+
+
+def _align_to_schema(table: "Any", schema: "Any") -> "Any":
+    """Return *table* with the unified schema, missing columns as typed nulls."""
+    import pyarrow as pa
+
+    columns = []
+    for field in schema:
+        if field.name in table.column_names:
+            column = table.column(field.name)
+            columns.append(
+                column
+                if column.type == field.type
+                else column.cast(field.type)
+            )
+        else:
+            columns.append(pa.nulls(table.num_rows, type=field.type))
+    return pa.Table.from_arrays(columns, schema=schema)
 
 
 def _stream_parquet(sources: list[Path], destination: Path) -> None:
-    """Concatenate spooled chunks into one parquet without loading them all."""
+    """Concatenate spooled chunks into one parquet without loading them all.
+
+    The writer is opened on the union of every chunk's schema rather than on
+    the first chunk's. Pinning it to chunk 0 assumed all chunks carry the same
+    columns with the same types, which held only while no chunk could differ.
+    """
     import pyarrow.parquet as pq
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1010,11 +942,12 @@ def _stream_parquet(sources: list[Path], destination: Path) -> None:
     temporary = Path(temporary_name)
     writer = None
     try:
+        schema = _unified_spool_schema(sources) if sources else None
         for source in sources:
             table = pq.read_table(source)
             if writer is None:
-                writer = pq.ParquetWriter(temporary, table.schema)
-            writer.write_table(table)
+                writer = pq.ParquetWriter(temporary, schema)
+            writer.write_table(_align_to_schema(table, schema))
             del table
         if writer is not None:
             writer.close()
@@ -1060,18 +993,37 @@ def _read_spool_projection(sources: list[Path]) -> pd.DataFrame:
 
     if not sources:
         return pd.DataFrame()
-    available = pq.read_schema(sources[0]).names
-    keep = [
-        name
-        for name in available
-        if name not in _GLOBAL_STAGE_EXCLUDED_COLUMNS
+    # Each chunk is projected against its OWN schema. Reading every chunk with
+    # the first chunk's column list assumed all chunks carry the same columns,
+    # which held only while no chunk could differ: with routing inert nothing
+    # was ever reviewed, so the LLM columns were absent from all of them
+    # equally. Once one chunk contains a reviewed offer and another does not,
+    # their schemas genuinely differ and demanding chunk 0's columns from a
+    # chunk that lacks them raises rather than yielding a null column.
+    schemas = [pq.read_schema(source).names for source in sources]
+    keeps = [
+        [name for name in names if name not in _GLOBAL_STAGE_EXCLUDED_COLUMNS]
+        for names in schemas
     ]
+    # Union in first-seen order, so the column order a caller sees does not
+    # depend on which chunk happened to introduce a column. A single-pass run
+    # produces one frame carrying every column, and concat below fills a
+    # column a chunk never had with NaN - the same value a single-pass row
+    # that was never reviewed already carries.
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for keep in keeps:
+        for name in keep:
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
     frames = [
-        pd.read_parquet(source, columns=keep) for source in sources
+        pd.read_parquet(source, columns=keep)
+        for source, keep in zip(sources, keeps)
     ]
     combined = pd.concat(frames, ignore_index=True)
     frames.clear()
-    return combined
+    return combined.reindex(columns=ordered)
 
 
 def run_shadow_observation(
@@ -1138,11 +1090,9 @@ def run_shadow_observation(
 
     master_context = _build_master_context(product_master.copy(deep=True))
     feature_failures = 0
-    embedding_retrieval_result: EmbeddingRetrievalResult | None = None
     agreement_frames: list[pd.DataFrame] = []
     llm_results: list[Any] = []
     llm_provider_calls = 0
-    embedding_results: list[Any] = []
     scored_frames: list[pd.DataFrame] = []
     total_own_offers = len(own_offers)
     total_candidate_rows = 0
@@ -1153,7 +1103,6 @@ def run_shadow_observation(
         (
             chunk_frame,
             chunk_failures,
-            chunk_retrieval,
         ) = _build_candidate_features_for_slice(
             chunk_offers,
             master_context,
@@ -1162,7 +1111,6 @@ def run_shadow_observation(
             shadow_run_id=effective_run_id,
             timestamp=timestamp,
             registered=registered,
-            embedding_config=config.embedding,
             progress=progress,
             progress_offset=start,
             progress_total=total_own_offers,
@@ -1172,8 +1120,6 @@ def run_shadow_observation(
             + (time.perf_counter() - stage_started)
         )
         feature_failures += chunk_failures
-        if embedding_retrieval_result is None:
-            embedding_retrieval_result = chunk_retrieval
         if chunk_frame.empty:
             del chunk_frame, chunk_offers
             continue
@@ -1200,7 +1146,6 @@ def run_shadow_observation(
         agreement_frames.append(scored.agreement_frame)
         llm_results.append(scored.llm_result)
         llm_provider_calls += int(scored.llm_result.provider_calls or 0)
-        embedding_results.append(scored.embedding_result)
         total_candidate_rows += len(scored.frame)
 
         # Progress is reported cumulatively: the dashboard tracker keeps the
@@ -1211,15 +1156,6 @@ def run_shadow_observation(
                 stop,
                 total_own_offers,
                 f"Scored {total_candidate_rows:,} candidate pairs",
-            )
-            progress(
-                "embedding",
-                stop,
-                total_own_offers,
-                (
-                    f"Embedding status: {scored.embedding_status}; "
-                    f"{total_candidate_rows:,} candidate pairs checked"
-                ),
             )
             progress(
                 "agreement",
@@ -1282,7 +1218,6 @@ def run_shadow_observation(
         else pd.concat(agreement_frames, ignore_index=True)
     )
     agreement_frames.clear()
-    embedding_result = _merge_embedding_results(embedding_results)
     llm_review_result = _merge_llm_results(llm_results)
     llm_results.clear()
     agreement_result = _AgreementTotals(frame=agreement_frame)
@@ -1406,95 +1341,6 @@ def run_shadow_observation(
         "prediction_rows": int(len(candidate_frame)),
         "offer_groups": int(candidate_frame["offer_group_id"].nunique()),
         "failed_shadow_predictions": int(feature_failures),
-        "embedding_scoring": {
-            "enabled": config.embedding.enabled,
-            "requested": embedding_result.requested,
-            "available": embedding_result.available,
-            "used": embedding_result.used,
-            "status": embedding_result.status,
-            "backend": config.embedding.backend,
-            "model_name": config.embedding.model_name,
-            "model_version": (
-                config.embedding.model_version or "UNRESOLVED"
-            ),
-            "device": embedding_result.device,
-            "vector_dimension": embedding_result.vector_dimension,
-            "cache_fingerprint": embedding_result.cache_fingerprint,
-            "candidates_scored": embedding_result.candidates_scored,
-            "failures": embedding_result.failures,
-            "runtime_seconds": embedding_result.runtime_seconds,
-            "cache_hits": embedding_result.cache_hits,
-            "cache_misses": embedding_result.cache_misses,
-            "error": embedding_result.error,
-            "used_for_production_decision": False,
-        },
-        "embedding_retrieval": {
-            "status": (
-                embedding_retrieval_result.status
-                if embedding_retrieval_result is not None
-                else "NOT_APPLICABLE"
-            ),
-            "requested": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.requested
-            ),
-            "available": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.available
-            ),
-            "used": bool(
-                embedding_retrieval_result
-                and embedding_retrieval_result.used
-            ),
-            "offers_retrieved": (
-                embedding_retrieval_result.offers_retrieved
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "master_vectors": (
-                embedding_retrieval_result.master_vectors
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "runtime_seconds": (
-                embedding_retrieval_result.runtime_seconds
-                if embedding_retrieval_result is not None
-                else 0.0
-            ),
-            "cache_hits": (
-                embedding_retrieval_result.cache_hits
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "cache_misses": (
-                embedding_retrieval_result.cache_misses
-                if embedding_retrieval_result is not None
-                else 0
-            ),
-            "error": (
-                embedding_retrieval_result.error
-                if embedding_retrieval_result is not None
-                else None
-            ),
-        },
-        "agreement_routing": {
-            "offers": len(agreement_result.frame),
-            "status_counts": {
-                str(key): int(value)
-                for key, value in agreement_result.frame[
-                    "agreement_status"
-                ].value_counts().items()
-            },
-            "route_counts": {
-                str(key): int(value)
-                for key, value in agreement_result.frame[
-                    "routing_decision"
-                ].value_counts().items()
-            },
-            "llm_called": bool(llm_review_result.provider_calls),
-            "learning_dataset_modified": False,
-            "routes_are_observational": True,
-        },
         "llm_review": {
             "enabled": config.llm_review.enabled,
             "status": llm_review_result.status,

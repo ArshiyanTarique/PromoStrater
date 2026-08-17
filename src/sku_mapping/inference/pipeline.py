@@ -21,6 +21,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from sku_mapping.config import PipelineConfig
+from sku_mapping.matching.routing import RoutingMode
 from sku_mapping.constants import FinalMatchDecision, MLDeploymentMode
 from sku_mapping.failure_diagnostics import capture_exception_details
 from sku_mapping.features.commercial_entities import expand_offer_entities
@@ -203,10 +204,6 @@ def _base_record(
         "final_decision_reason": "",
         "final_eligible_mapping": False,
         "lightgbm_probability": None,
-        "embedding_similarity": None,
-        "embedding_status": "",
-        "embedding_failure_reason": "",
-        "lightgbm_embedding_agreement": False,
         "agreement_status": "",
         "agreement_route": "",
         "llm_decision": "",
@@ -216,7 +213,6 @@ def _base_record(
         )
         or "UNREVIEWED",
         "model_id": model_id,
-        "embedding_model_id": "",
         "llm_model_id": "",
         "run_id": run_id,
         "hard_conflict": False,
@@ -429,18 +425,6 @@ def finalize_unified_decisions(
                 "lightgbm_probability": _safe_float(
                     selected.get("calibrated_probability")
                 ),
-                "embedding_similarity": _safe_float(
-                    selected.get("embedding_similarity")
-                ),
-                "embedding_status": _safe_text(
-                    selected.get("embedding_status")
-                ),
-                "embedding_failure_reason": _safe_text(
-                    selected.get("embedding_failure_reason")
-                ),
-                "lightgbm_embedding_agreement": _safe_bool(
-                    top.get("same_top_candidate", False)
-                ),
                 "agreement_status": agreement_status,
                 "agreement_route": agreement_route,
                 "mapping_outcome": _safe_text(
@@ -463,9 +447,6 @@ def finalize_unified_decisions(
                 ),
                 "llm_confidence": _safe_float(
                     top.get("llm_confidence")
-                ),
-                "embedding_model_id": _safe_text(
-                    selected.get("embedding_model_id")
                 ),
                 "llm_model_id": _safe_text(
                     top.get("llm_model_id")
@@ -535,8 +516,8 @@ def finalize_unified_decisions(
 
         if agreement_route == "AUTO_ACCEPT":
             decision = FinalMatchDecision.AUTO_ACCEPT
-            decision_source = "LIGHTGBM_EMBEDDING_AGREEMENT"
-            decision_reason = "SAFE_AGREEMENT_POLICY"
+            decision_source = "LIGHTGBM_THRESHOLD"
+            decision_reason = "ABOVE_AUTO_ACCEPT_THRESHOLD"
         elif agreement_route == "LLM_REVIEW":
             llm_route = _safe_text(top.get("llm_final_route"))
             if llm_route == "LLM_ACCEPT":
@@ -567,11 +548,7 @@ def finalize_unified_decisions(
                 decision_reason = _manual_reason(top)
         else:
             decision = FinalMatchDecision.MANUAL_REVIEW
-            decision_source = (
-                "EMBEDDING_FAILURE_SAFE_POLICY"
-                if agreement_status == "EMBEDDING_UNAVAILABLE"
-                else "AGREEMENT_POLICY"
-            )
+            decision_source = "AGREEMENT_POLICY"
             decision_reason = _manual_reason(top)
 
         selected_itemcode = _safe_text(
@@ -607,15 +584,6 @@ def finalize_unified_decisions(
                 "final_eligible_mapping": eligible,
                 "lightgbm_probability": _safe_float(
                     selected.get("calibrated_probability")
-                ),
-                "embedding_similarity": _safe_float(
-                    selected.get("embedding_similarity")
-                ),
-                "embedding_status": _safe_text(
-                    selected.get("embedding_status")
-                ),
-                "embedding_failure_reason": _safe_text(
-                    selected.get("embedding_failure_reason")
                 ),
             }
         )
@@ -890,44 +858,6 @@ def _statistics(
         "competitor_offer_count": int(
             counts.get(FinalMatchDecision.COMPETITOR_OFFER.value, 0)
         ),
-        "embedding_status": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("status", "NOT_APPLICABLE"),
-        "embedding_requested": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "requested", False
-            )
-        ),
-        "embedding_available": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "available", False
-            )
-        ),
-        "embedding_used": bool(
-            shadow_manifest.get("embedding_scoring", {}).get(
-                "used", False
-            )
-        ),
-        "embedding_device": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("device", ""),
-        "embedding_vector_dimension": shadow_manifest.get(
-            "embedding_scoring", {}
-        ).get("vector_dimension"),
-        "embedding_failure_reason": (
-            shadow_manifest.get("embedding_scoring", {}).get("error")
-            or (
-                "DISABLED_BY_CONFIGURATION"
-                if shadow_manifest.get("embedding_scoring", {}).get(
-                    "status"
-                )
-                == "DISABLED"
-                else ""
-            )
-        ),
-        "lightgbm_embedding_agreement_rate": (
-            float(same_top.mean()) if len(same_top) else None
-        ),
         "llm_calls": int(
             shadow_manifest.get("llm_review", {}).get(
                 "provider_calls", 0
@@ -1032,8 +962,12 @@ def run_unified_inference(
         shadow_mode=shadow_config,
         agreement=replace(
             config.agreement,
+            # The global Gemini toggle decides the cut-off, so the own-brand
+            # path and the shared matcher cannot disagree about what counts as
+            # good enough in a given run. Was config.ml.auto_accept_threshold,
+            # which pinned production to one number whatever the toggle said.
             lightgbm_auto_accept_threshold=(
-                config.ml.auto_accept_threshold
+                RoutingMode.from_config(config).auto_accept_threshold
             ),
         ),
     )
@@ -1047,11 +981,6 @@ def run_unified_inference(
     if not own_mask.any():
         shadow_result = None
         shadow_manifest = {
-            "embedding_scoring": {
-                "status": "NOT_APPLICABLE",
-                "enabled": config.embedding.enabled,
-                "error": None,
-            },
             "stage_runtimes_seconds": {},
         }
         finalization_started = time.perf_counter()
@@ -1153,7 +1082,6 @@ def run_unified_inference(
             "run_id": effective_run_id,
             "mode": config.ml.mode.value,
             "model_id": config.ml.model_id,
-            "embedding_enabled": config.embedding.enabled,
             "llm_review_enabled": config.llm_review.enabled,
             "shadow_status": (
                 shadow_result.status
@@ -1321,7 +1249,6 @@ def run_unified_inference_non_blocking(
                 "run_id": effective_run_id,
                 "mode": config.ml.mode.value,
                 "model_id": config.ml.model_id,
-                "embedding_enabled": config.embedding.enabled,
                 "llm_review_enabled": config.llm_review.enabled,
                 "shadow_status": "FAILED_BEFORE_COMPLETION",
                 "production_application_enabled": (

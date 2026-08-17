@@ -36,12 +36,15 @@ class FinalMatchDecision(str, Enum):
 
 
 class AgreementStatus(str, Enum):
-    """Evidence state for the two independent candidate scorers."""
+    """Outcome state of the own-brand decision policy."""
 
     SAFE_AGREEMENT = "SAFE_AGREEMENT"
     WEAK_AGREEMENT = "WEAK_AGREEMENT"
     DISAGREEMENT = "DISAGREEMENT"
-    EMBEDDING_UNAVAILABLE = "EMBEDDING_UNAVAILABLE"
+    #: The model decided on its own confidence: the matcher is LightGBM, and
+    #: a low score escalates to review rather than being corroborated. This is
+    #: the only status a completed decision carries.
+    LIGHTGBM_ONLY = "LIGHTGBM_ONLY"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
 
 
@@ -61,14 +64,8 @@ class AgreementReasonCode(str, Enum):
     DIFFERENT_TOP_CANDIDATE = "DIFFERENT_TOP_CANDIDATE"
     LIGHTGBM_BELOW_THRESHOLD = "LIGHTGBM_BELOW_THRESHOLD"
     HARD_CONFLICT = "HARD_CONFLICT"
-    EMBEDDING_UNAVAILABLE = "EMBEDDING_UNAVAILABLE"
     LIGHTGBM_UNAVAILABLE = "LIGHTGBM_UNAVAILABLE"
     MASTER_SKU_MISSING = "MASTER_SKU_MISSING"
-    WEAK_EMBEDDING_MARGIN = "WEAK_EMBEDDING_MARGIN"
-    WEAK_EMBEDDING_SIMILARITY = "WEAK_EMBEDDING_SIMILARITY"
-    EMBEDDING_AUTO_INFLUENCE_DISABLED = (
-        "EMBEDDING_AUTO_INFLUENCE_DISABLED"
-    )
 
 
 MODEL_FEATURE_COLUMNS: list[str] = [

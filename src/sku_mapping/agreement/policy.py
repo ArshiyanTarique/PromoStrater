@@ -1,4 +1,4 @@
-"""Conservative agreement policy over LightGBM and embedding rankings."""
+"""Own-brand decision policy over the LightGBM candidate ranking."""
 
 from __future__ import annotations
 
@@ -48,11 +48,6 @@ class AgreementResult:
     lightgbm_top_rank: int | None
     lightgbm_candidate_rank: int | None
     lightgbm_score_margin: float | None
-    embedding_top_candidate: str | None
-    embedding_similarity: float | None
-    embedding_rank: int | None
-    embedding_candidate_rank: int | None
-    embedding_score_margin: float | None
     same_top_candidate: bool
     candidate_generation_margin: float | None
     candidate_generation_raw_margin: float | None
@@ -73,11 +68,6 @@ class AgreementResult:
             "lightgbm_top_rank": self.lightgbm_top_rank,
             "lightgbm_candidate_rank": self.lightgbm_candidate_rank,
             "lightgbm_score_margin": self.lightgbm_score_margin,
-            "embedding_top_candidate": self.embedding_top_candidate,
-            "embedding_similarity": self.embedding_similarity,
-            "embedding_rank": self.embedding_rank,
-            "embedding_candidate_rank": self.embedding_candidate_rank,
-            "embedding_score_margin": self.embedding_score_margin,
             "same_top_candidate": self.same_top_candidate,
             "candidate_generation_margin": self.candidate_generation_margin,
             "candidate_generation_raw_margin": (
@@ -245,28 +235,16 @@ def _result(
     *,
     offer_id: str,
     lightgbm: _Ordered | None,
-    embedding: _Ordered | None,
     conflicts: Mapping[str, bool],
     status: AgreementStatus,
     route: ReviewRoute,
     reasons: list[AgreementReasonCode],
 ) -> AgreementResult:
     lightgbm_top = lightgbm.top if lightgbm is not None else None
-    embedding_top = embedding.top if embedding is not None else None
     lightgbm_itemcode = (
         str(lightgbm_top["master_itemcode"])
         if lightgbm_top is not None
         else None
-    )
-    embedding_itemcode = (
-        str(embedding_top["master_itemcode"])
-        if embedding_top is not None
-        else None
-    )
-    same = bool(
-        lightgbm_itemcode is not None
-        and embedding_itemcode is not None
-        and lightgbm_itemcode == embedding_itemcode
     )
     return AgreementResult(
         offer_id=offer_id,
@@ -281,18 +259,10 @@ def _result(
             else None
         ),
         lightgbm_score_margin=_score_margin(lightgbm),
-        embedding_top_candidate=embedding_itemcode,
-        embedding_similarity=(
-            embedding.top_score if embedding is not None else None
-        ),
-        embedding_rank=1 if embedding_top is not None else None,
-        embedding_candidate_rank=(
-            int(embedding_top["candidate_rank"])
-            if embedding_top is not None
-            else None
-        ),
-        embedding_score_margin=_score_margin(embedding),
-        same_top_candidate=same,
+        # One scorer decides, so there is no second top candidate to agree
+        # with. Retained as a column because downstream consumers read it; it
+        # is now constant rather than comparative.
+        same_top_candidate=False,
         candidate_generation_margin=(
             float(lightgbm_top["candidate_margin"])
             if lightgbm_top is not None
@@ -326,7 +296,6 @@ def _evaluate_offer(
         return _result(
             offer_id=offer_id,
             lightgbm=None,
-            embedding=None,
             conflicts=no_conflicts,
             status=AgreementStatus.MODEL_UNAVAILABLE,
             route=ReviewRoute.SAFE_FALLBACK,
@@ -357,136 +326,50 @@ def _evaluate_offer(
     if master_missing:
         conflicts["missing_master"] = True
 
-    embedding_columns_present = {
-        "embedding_similarity",
-        "embedding_failure_reason",
-    }.issubset(group.columns)
-    embedding_valid = (
-        _valid_scores(group["embedding_similarity"], probability=False)
-        if embedding_columns_present
-        else pd.Series(False, index=group.index)
-    )
-    embedding_failures = (
-        group["embedding_failure_reason"]
-        .astype("string")
-        .fillna("")
-        .str.strip()
-        .ne("")
-        if embedding_columns_present
-        else pd.Series(True, index=group.index)
-    )
-    embedding_available = bool(
-        embedding_columns_present
-        and embedding_valid.all()
-        and not embedding_failures.any()
-    )
-    embedding = (
-        _ordered(group, "embedding_similarity", preferred_mask)
-        if embedding_available
-        else None
-    )
-    hard_conflict = any(conflicts.values())
-
-    if not embedding_available:
-        reasons = [AgreementReasonCode.EMBEDDING_UNAVAILABLE]
-        if master_missing:
-            reasons.append(AgreementReasonCode.MASTER_SKU_MISSING)
-        if hard_conflict:
-            reasons.append(AgreementReasonCode.HARD_CONFLICT)
-        return _result(
-            offer_id=offer_id,
-            lightgbm=lightgbm,
-            embedding=None,
-            conflicts=conflicts,
-            status=AgreementStatus.EMBEDDING_UNAVAILABLE,
-            route=(
-                config.hard_conflict_route
-                if hard_conflict
-                else ReviewRoute.SAFE_FALLBACK
-            ),
-            reasons=reasons,
-        )
-
-    embedding_itemcode = str(embedding.top["master_itemcode"])
-    same = lightgbm_itemcode == embedding_itemcode
-    reasons = [
-        AgreementReasonCode.SAME_TOP_CANDIDATE
-        if same
-        else AgreementReasonCode.DIFFERENT_TOP_CANDIDATE
-    ]
+    # ML-only decision.
+    #
+    # This replaces a two-scorer agreement test. The old policy asked whether
+    # LightGBM and an embedding scorer picked the same candidate, which made a
+    # second scorer a precondition for any decision: with embeddings disabled
+    # every offer returned EMBEDDING_UNAVAILABLE and nothing could ever be
+    # accepted, however confident the model was.
+    #
+    # The safety gates below are unchanged and still run first. A hard
+    # conflict or a missing master is a property of the candidate, not of how
+    # many scorers examined it, so neither is ever overridden by confidence.
+    reasons: list[AgreementReasonCode] = []
     if master_missing:
         reasons.append(AgreementReasonCode.MASTER_SKU_MISSING)
+    hard_conflict = any(conflicts.values())
     if hard_conflict:
         reasons.append(AgreementReasonCode.HARD_CONFLICT)
         return _result(
             offer_id=offer_id,
             lightgbm=lightgbm,
-            embedding=embedding,
             conflicts=conflicts,
-            status=AgreementStatus.WEAK_AGREEMENT,
+            status=AgreementStatus.LIGHTGBM_ONLY,
             route=config.hard_conflict_route,
             reasons=reasons,
         )
-
-    if not same and config.require_same_top_candidate:
+    if lightgbm.top_score < config.lightgbm_auto_accept_threshold:
+        # Below the configured bar the candidate is escalated, never rejected
+        # and never quietly accepted. weak_agreement_route is the review queue
+        # the second-stage reviewer reads.
+        reasons.append(AgreementReasonCode.LIGHTGBM_BELOW_THRESHOLD)
         return _result(
             offer_id=offer_id,
             lightgbm=lightgbm,
-            embedding=embedding,
             conflicts=conflicts,
-            status=AgreementStatus.DISAGREEMENT,
-            route=config.disagreement_route,
+            status=AgreementStatus.LIGHTGBM_ONLY,
+            route=config.weak_agreement_route,
             reasons=reasons,
         )
-
-    weak = False
-    probability = lightgbm.top_score
-    if probability < config.lightgbm_auto_accept_threshold:
-        reasons.append(AgreementReasonCode.LIGHTGBM_BELOW_THRESHOLD)
-        weak = True
-    embedding_similarity = embedding.top_score
-    if (
-        config.minimum_embedding_similarity is not None
-        and embedding_similarity < config.minimum_embedding_similarity
-    ):
-        reasons.append(AgreementReasonCode.WEAK_EMBEDDING_SIMILARITY)
-        weak = True
-    embedding_margin = _score_margin(embedding)
-    if (
-        config.minimum_embedding_margin is not None
-        and (
-            embedding_margin is None
-            or embedding_margin < config.minimum_embedding_margin
-        )
-    ):
-        reasons.append(AgreementReasonCode.WEAK_EMBEDDING_MARGIN)
-        weak = True
-    if not same:
-        weak = True
-    if not weak and not config.allow_embedding_auto_accept:
-        reasons.append(
-            AgreementReasonCode.EMBEDDING_AUTO_INFLUENCE_DISABLED
-        )
-
     return _result(
         offer_id=offer_id,
         lightgbm=lightgbm,
-        embedding=embedding,
         conflicts=conflicts,
-        status=(
-            AgreementStatus.WEAK_AGREEMENT
-            if weak
-            else AgreementStatus.SAFE_AGREEMENT
-        ),
-        route=(
-            config.weak_agreement_route
-            if weak
-            else (
-                ReviewRoute.AUTO_ACCEPT
-                if config.allow_embedding_auto_accept
-                else ReviewRoute.MANUAL_REVIEW
-            )
-        ),
+        status=AgreementStatus.LIGHTGBM_ONLY,
+        route=ReviewRoute.AUTO_ACCEPT,
         reasons=reasons,
     )
 

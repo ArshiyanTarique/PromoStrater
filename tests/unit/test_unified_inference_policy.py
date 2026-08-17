@@ -21,7 +21,6 @@ def _offers() -> pd.DataFrame:
                 "hard",
                 "none",
                 "model",
-                "embedding-failed",
                 "llm-invalid",
                 "master-missing",
             ],
@@ -32,7 +31,6 @@ def _offers() -> pd.DataFrame:
                 "Conflict offer",
                 "No candidate offer",
                 "Model failure offer",
-                "Embedding failure offer",
                 "Invalid LLM offer",
                 "Missing master offer",
             ],
@@ -56,8 +54,6 @@ def _candidate(
     llm_candidate: str = "",
     llm_confidence: float | None = None,
     hard_conflict: bool = False,
-    embedding_status: str = "COMPLETED",
-    embedding_failure_reason: str = "",
 ) -> dict:
     return {
         "offer_group_id": offer_id,
@@ -65,10 +61,6 @@ def _candidate(
         "master_itemcode": sku,
         "master_item_description": f"Description {sku}",
         "calibrated_probability": probability,
-        "embedding_similarity": similarity,
-        "embedding_status": embedding_status,
-        "embedding_failure_reason": embedding_failure_reason,
-        "embedding_model_id": "embedding:test-v1",
         "agreement_status": agreement_status,
         "routing_decision": agreement_route,
         "same_top_candidate": same_top,
@@ -158,16 +150,6 @@ def _candidates() -> pd.DataFrame:
             agreement_route="SAFE_FALLBACK",
         ),
         _candidate(
-            "embedding-failed",
-            "SKU-E",
-            probability=0.90,
-            similarity=None,
-            agreement_status="EMBEDDING_UNAVAILABLE",
-            agreement_route="SAFE_FALLBACK",
-            embedding_status="UNAVAILABLE",
-            embedding_failure_reason="DEPENDENCY_UNAVAILABLE",
-        ),
-        _candidate(
             "llm-invalid",
             "SKU-I",
             probability=0.81,
@@ -238,21 +220,6 @@ def test_full_final_routing_matrix_and_provenance() -> None:
     assert decisions.loc["model", "final_decision"] == (
         FinalMatchDecision.MODEL_ERROR.value
     )
-    assert decisions.loc["embedding-failed", "final_decision"] == (
-        FinalMatchDecision.MANUAL_REVIEW.value
-    )
-    assert (
-        decisions.loc["embedding-failed", "proposed_master_sku"]
-        == "SKU-E"
-    )
-    assert (
-        decisions.loc["embedding-failed", "embedding_status"]
-        == "UNAVAILABLE"
-    )
-    assert (
-        decisions.loc["embedding-failed", "embedding_failure_reason"]
-        == "DEPENDENCY_UNAVAILABLE"
-    )
     assert decisions.loc["llm-invalid", "final_decision"] == (
         FinalMatchDecision.MANUAL_REVIEW.value
     )
@@ -270,13 +237,10 @@ def test_full_final_routing_matrix_and_provenance() -> None:
         "final_decision",
         "decision_source",
         "lightgbm_probability",
-        "embedding_similarity",
-        "lightgbm_embedding_agreement",
         "llm_decision",
         "llm_confidence",
         "human_review_status",
         "model_id",
-        "embedding_model_id",
         "llm_model_id",
         "run_id",
     }

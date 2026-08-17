@@ -91,9 +91,6 @@ def observe_unified_result(
         if not decisions.empty
         else {}
     )
-    embedding_model_id = _first_nonempty(
-        candidates, "embedding_model_id"
-    )
     llm_model_id = _first_nonempty(candidates, "llm_model_id")
     package_hash = _first_nonempty(candidates, "model_package_sha256")
     store.upsert_pipeline_run(
@@ -114,7 +111,6 @@ def observe_unified_result(
             "deployment_mode": config.ml.mode.value,
             "status": result.status,
             "model_id": config.ml.model_id,
-            "embedding_model_id": embedding_model_id,
             "llm_model_id": llm_model_id,
             "threshold": config.ml.auto_accept_threshold,
             "output_paths": {
@@ -196,9 +192,6 @@ def observe_unified_result(
                 "candidate_rank": int(candidate.get("candidate_rank")),
                 "lightgbm_probability": _safe_float(
                     candidate.get("calibrated_probability")
-                ),
-                "embedding_similarity": _safe_float(
-                    candidate.get("embedding_similarity")
                 ),
                 "agreement_status": _safe_text(
                     candidate.get("agreement_status")

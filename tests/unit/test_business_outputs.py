@@ -585,3 +585,163 @@ def test_supplied_competitor_pool_leaves_the_own_brand_mapping_unchanged() -> No
     # Only competitor recall changes.
     assert baseline.competitor_export.iloc[0]["competitor_count"] == 0
     assert widened.competitor_export.iloc[0]["competitor_count"] == 1
+
+
+def _combo_offer_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """A nuggets SKU beside a combo flyer whose primary product is fries.
+
+    The offer name lists four products, chicken nuggets among them, so the
+    family sets - which read the whole offer name - intersect the target and
+    let it through. Only the ``Product`` column says what the offer is
+    actually for.
+    """
+    common = {
+        "Country": "KSA",
+        "Retailer Name": "Retailer",
+        "Flyer Name": "Flyer",
+        "Variant": "",
+    }
+    raw = pd.DataFrame(
+        [
+            {
+                **common,
+                "offerid": "own-1",
+                "Offer Name": "Al Kabeer Chicken Nuggets 400g",
+                "Offer Price": 10,
+                "Regular Price": 12,
+                "Brand Name": "Al Kabeer",
+                "Product": "Chicken Nuggets",
+                "Base Packsize": "400g",
+            },
+            {
+                **common,
+                "offerid": "comp-same-form",
+                "Offer Name": "Americana Chicken Nuggets 400g",
+                "Offer Price": 9,
+                "Regular Price": 11,
+                "Brand Name": "Americana",
+                "Product": "Chicken Nuggets",
+                "Base Packsize": "400g",
+            },
+            {
+                **common,
+                "offerid": "comp-combo",
+                "Offer Name": (
+                    "Americana Chicken Fries/ Nuggets/ Popcorn/ Fillet 400g"
+                ),
+                "Offer Price": 8,
+                "Regular Price": 10,
+                "Brand Name": "Americana",
+                "Product": "Chicken Fries",
+                "Base Packsize": "400g",
+            },
+        ]
+    )
+    prepared = preprocess_clickflyer(raw)
+    prepared["offer_group_id"] = prepared["offerid"]
+    master = preprocess_product_master(
+        pd.DataFrame(
+            [
+                {
+                    "Itemcode": "SKU-NUGGETS",
+                    "Itemname": "Chicken Nuggets",
+                    "Item-Cat-2": "Chicken",
+                    "Item-Cat-4": "Chicken Nuggets",
+                    "Item Description": "Frozen Chicken Nuggets 400g",
+                    "Item-Spec": "400 GRM x 10 Pkts",
+                }
+            ]
+        )
+    )
+    decisions = pd.DataFrame(
+        [
+            {
+                "offer_id": "own-1",
+                "offer_name": "Al Kabeer Chicken Nuggets 400g",
+                "matched_master_sku": "SKU-NUGGETS",
+                "decision": "AUTO_ACCEPT",
+                "score": 0.99,
+                "reason_codes": "[]",
+            }
+        ]
+    )
+    return prepared, master, decisions
+
+
+def test_competitor_must_share_the_product_form_not_merely_name_it() -> None:
+    """Only chicken fries compete with chicken fries.
+
+    A combo flyer that lists four products under a single price mentions the
+    target's form in its name, which is enough to satisfy the family sets. The
+    form gate reads ``Product`` - the offer's primary item - so the bundle is
+    excluded while a genuine same-form rival is kept.
+    """
+    prepared, master, decisions = _combo_offer_frames()
+    mapping = build_sku_mapping_export(
+        prepared, master, decisions, run_id="form-run"
+    )
+
+    result = discover_competitors(
+        prepared,
+        master,
+        mapping,
+        config=load_config("config/default.yaml").competitors,
+        run_id="form-run",
+    )
+
+    rows = result.long_format.set_index("competitor_offer_id")
+    assert rows.loc["comp-same-form", "competitor_match_status"] in {
+        "MATCHED",
+        "AMBIGUOUS",
+    }
+    assert rows.loc["comp-combo", "competitor_match_status"] == "HARD_CONFLICT"
+    assert rows.loc["comp-combo", "competitor_match_reason"] == "FORM_CONFLICT"
+
+
+def test_relationships_are_evaluated_exactly_once(monkeypatch) -> None:
+    """The refactor's whole point: one evaluation per relationship.
+
+    Every relationship used to be scored twice - once to collect the scores
+    that decide ranks, once to emit rows - which doubled the cost of the most
+    expensive stage in a run. Ranks can only change SUPPORTED rows, so the
+    unsupported majority is final on first sight and the small supported set
+    is held back instead of being recomputed.
+    """
+    prepared = _prepared_offers()
+    mapping = build_sku_mapping_export(
+        prepared,
+        _master(),
+        _decisions().query("offer_id == 'own-1'"),
+        run_id="single-pass",
+    )
+    evaluated_rows: list[int] = []
+    original = competitor_discovery._evaluate_target
+
+    def counting_evaluator(**kwargs):
+        evaluated_rows.append(len(kwargs["competitor_pool"]))
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        competitor_discovery, "_evaluate_target", counting_evaluator
+    )
+    result = discover_competitors(
+        prepared,
+        _master(),
+        mapping,
+        config=load_config("config/default.yaml").competitors,
+        run_id="single-pass",
+    )
+
+    considered = int(
+        result.diagnostics["target_offer_relationships_evaluated"]
+    )
+    assert sum(evaluated_rows) == considered, (
+        "each relationship must be featurised once; "
+        f"{sum(evaluated_rows)} evaluations for {considered} relationships"
+    )
+    supported = result.long_format[
+        result.long_format["competitor_match_status"].isin(
+            competitor_discovery.SUPPORTED_COMPETITOR_STATUSES
+        )
+    ]
+    assert supported["competitor_rank"].notna().all()

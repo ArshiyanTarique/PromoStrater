@@ -63,14 +63,10 @@ def _category_specs(
             ),
         ),
         (
-            "LIGHTGBM_EMBEDDING_DISAGREEMENT",
+            "LIGHTGBM_DISAGREEMENT",
             lambda row: (
                 str(row.get("agreement_status", "")).upper()
                 == "DISAGREEMENT"
-                or (
-                    row.get("embedding_similarity") is not None
-                    and not _same_top(row)
-                )
             ),
             lambda row: (-_probability(row), str(row["offer_id"])),
         ),

@@ -51,7 +51,7 @@ def test_targeted_selection_is_deterministic_and_unique() -> None:
     assert [item.category for item in first] == [
         "HIGH_CONFIDENCE_AUTO_ACCEPT",
         "NEAR_AUTO_ACCEPT_THRESHOLD",
-        "LIGHTGBM_EMBEDDING_DISAGREEMENT",
+        "LIGHTGBM_DISAGREEMENT",
         "LLM_REVIEWED",
         "DIFFICULT_OR_CONFLICT_PRONE",
     ]

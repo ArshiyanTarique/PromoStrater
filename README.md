@@ -16,8 +16,13 @@ LLM output are review evidence, not ground truth.
 
 An uploaded ClickFlyer dump is validated and processed through:
 
-1. existing RapidFuzz candidate generation;
-2. the shared 19-column feature generator;
+1. existing RapidFuzz candidate generation (category-gated, top-K);
+2. the shared feature contract — 19 base columns from
+   `features/feature_generator.py`, plus 6 discriminative columns and 16
+   group-relative rank columns for ranked models. The registered package
+   declares its own list; `ranked-v5-cal` uses all 41 and sets
+   `requires_group_features`, so a candidate shortlist must be featurised
+   together rather than one pair at a time;
 3. registered, calibrated LightGBM candidate scoring;
 4. independent local embedding scoring;
 5. deterministic agreement and hard-conflict policy;
@@ -142,19 +147,75 @@ blocked from routine training and evaluation. See
 
 ## Repository map
 
-- `dashboard/` — Streamlit presentation and page-independent dashboard services.
+Entry point: **`dashboard/Dashboard.py`**. `dashboard/bootstrap.py` puts
+`src/` on `sys.path` before anything else, so the working tree always wins
+over an installed copy.
+
+- `dashboard/` — Streamlit pages (1–6) and page-independent services.
+  `services/processing_service.py` is the background worker that runs a whole
+  upload end to end.
+- `src/sku_mapping/data/` — loaders, validators, preprocessing, offer identity.
+- `src/sku_mapping/matching/` — `candidate_generator.py` is the production
+  retriever; `matcher.py` / `rule_engine.py` are the pre-ML rule path, still
+  used by a parity test and a dry-run script.
 - `src/sku_mapping/features/` — shared training/inference feature contract.
-- `src/sku_mapping/matching/` — existing candidate generation and rules.
 - `src/sku_mapping/inference/` — unified assisted inference and final policy.
+- `src/sku_mapping/shadow/` — model package loading, scoring, sampling,
+  monitoring.
+- `src/sku_mapping/agreement/` — deterministic routing policy.
+- `src/sku_mapping/competitors/` — competitor discovery, optional ML
+  re-ranking, and the human review queue.
 - `src/sku_mapping/embedding/` — independent local embedding scorer and cache.
 - `src/sku_mapping/llm_review/` — bounded provider interface, parser, policy, and cache.
-- `src/sku_mapping/learning/` — SQLite observations and five-question reviews.
-- `src/sku_mapping/retraining/` — offline snapshots, challengers, comparison, activation, and rollback.
-- `sku_mapping_pipeline_ml.py` — authoritative legacy production entry point retained for compatibility.
+- `src/sku_mapping/exports/` — business and run outputs.
+- `src/sku_mapping/learning/` — SQLite store plus the migration history.
+- `src/sku_mapping/ml/` — offline training, calibration, evaluation, leakage
+  control, provenance.
+- `src/sku_mapping/retraining/`, `src/sku_mapping/training/` — offline
+  snapshots, challengers, comparison, activation, rollback, feature building.
+- `models/` — registered packages and the registry. Tracked on purpose: a
+  clone without them cannot score.
+- `config/default.yaml` — the only configuration file.
+- `tests/` — unit and integration suites; `scripts/` — offline CLI tools.
+- `sku_mapping_pipeline_ml.py` — authoritative legacy production entry point
+  retained for compatibility.
 
 The dashboard and modular services do not import the legacy monolith because
 that script intentionally executes when run. Core domain modules do not
 depend on Streamlit.
+
+**`src/sku_mapping/ml/calibration.py` must not be moved or deleted.** It is
+not imported by the dashboard, but the registered joblib package stores
+`IsotonicScoreCalibrator` and `ShadowModelPredictor` by module path, so
+joblib resolves it at load time. Removing it breaks every model load.
+
+## Competitor discovery
+
+Rules decide membership; the model only orders the result.
+
+```text
+competitor offers
+  -> category gate -> family / semantic-family overlap
+  -> protein conflict -> form conflict -> pack conflict
+  -> RapidFuzz score floors (raw 60 / adjusted 65)
+  -> [optional] LightGBM re-ranking (raw margin, ordering only)
+  -> per-target limit -> aggregate + long-format audit
+  -> [optional] review queue -> Competitor Review page
+```
+
+The re-ranker reuses the registered own-brand package. Its score is a raw
+margin comparable only inside one offer's shortlist; it is never read as a
+competitor probability and never crosses a threshold. Both the re-ranker and
+the review queue are off by default:
+
+- `competitors.ml_reranking_enabled: false`
+- `competitors.ml_shortlist_top_k: 0` (0 adopts the package's `retrieval_k`)
+- `competitors.brand_stripping_enabled: true`
+- `competitors.review_staging_per_target: 0`
+
+There is no competitor-labelled ground truth yet, so no precision or recall
+figure exists for competitor discovery — from the rules or the model. The
+review queue exists to start collecting it.
 
 ## Documentation
 
@@ -170,8 +231,12 @@ depend on Streamlit.
 
 ## Current limitations
 
-- The registered v3 package is `SHADOW_MODE_ONLY` and not approved for
-  automatic production matching.
+- The registered production package is `ranked-v5-cal-20260810T100756Z-matcher`
+  (`models/registry/matcher_ranked_v5_calibrated.joblib`). It is
+  `SHADOW_MODE_ONLY` and `NOT_APPROVED_FOR_AUTOMATIC_MATCHING`; its own
+  thresholds are auto `0.99` / review `0.94`, fitted on own-brand data only.
+  The separate `0.85` in configuration is a pipeline setting, not that model's
+  threshold.
 - The real learning store currently has no GOLD labels; the default 50-label
   retraining gate therefore blocks a real snapshot.
 - The audited default embedding encoder is deterministic lexical hashing, not

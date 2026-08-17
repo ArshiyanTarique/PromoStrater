@@ -84,7 +84,6 @@ with st.container(border=True):
         
     with col_b:
         st.caption(f"LightGBM Model: **{summary.get('model_id') or 'N/A'}**")
-        st.caption(f"Embedding Model: **{summary.get('embedding_model_id') or 'Disabled/Unavailable'}**")
         st.caption(f"LLM Model: **{summary.get('llm_model_id') or 'Disabled/Unavailable'}**")
         runtime_sec = summary.get("total_runtime_seconds")
         st.caption(f"Runtime: **{float(runtime_sec):.2f}s**" if runtime_sec is not None else "Runtime: N/A")

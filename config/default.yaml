@@ -32,6 +32,63 @@ competitors:
   # competitors and showed 5, several of them the same product from different
   # flyers. The dashboard detail lists scroll, so length is not a constraint.
   max_per_target: 0
+  # Order surviving competitors with the registered own-brand LightGBM package
+  # instead of the fuzzy score. RANKING ONLY: the model cannot admit a
+  # candidate, reject one, or override a protein/family/form/pack conflict, and
+  # its output is a raw margin - never a competitor probability. Off by default
+  # so the pre-ML ordering remains reachable without a code change.
+  # ON: the rules keep finding the relationships (recall), the model only
+  # orders what survived. Measured on a real samosa slice, replacing the rules
+  # with the model outright cut CKSA from 194 competitors to 4 and lost
+  # Biladi entirely - the package is trained on Al Kabeer -> Al Kabeer pairs
+  # and scores rival text out of domain. So it ranks; it never admits or
+  # rejects.
+  ml_reranking_enabled: true
+  # Candidates per offer shortlist. 0 adopts the model package's own
+  # retrieval_k (20 for ranked-v5), the group size it was trained against.
+  ml_shortlist_top_k: 0
+  # Remove a rival's own brand tokens before featurisation. Their brand can
+  # never appear in Al Kabeer master text, so leaving it in costs a competitor
+  # roughly 4 raw-margin points for naming itself.
+  brand_stripping_enabled: true
+  # Competitors staged per master SKU into the learning store for human
+  # review. 0 stages nothing - a run that writes to the store should be
+  # something you turned on. Set it to e.g. 10 to start collecting the
+  # competitor ground truth that neither the rules nor the borrowed model
+  # have ever been measured against. Labels the TOP of each list, so it
+  # measures precision at the top, not recall.
+  review_staging_per_target: 0
+
+  # --- Automatic competitor decisions -------------------------------------
+  # Every competitor relationship ends as ACCEPTED or REJECTED with no human
+  # in the loop. The rules gate first, the ranker orders what survives, the
+  # thresholds below settle the clear cases, and the LLM settles the rest.
+  # Anything still unresolved - an LLM refusal, timeout, malformed reply, or
+  # invented SKU - REJECTS. Off by default so rules-only stays reachable.
+  automatic_decisions_enabled: true
+  # PROVISIONAL THRESHOLDS - measured, not validated.
+  # Taken from an 8,000-row real slice: 2,683 supported relationships over
+  # 1,302 competitor offers, 99.1% of them scored by the model.
+  #   rank-1 raw margin  p25 -4.99  p50 -1.90  p75 +2.05  p90 +5.11
+  #   rank1-rank2 gap    p25  0.00  p50  2.12  p75  5.35  p90  9.48
+  # A quarter of offers have a gap of exactly 0.00 - the model cannot separate
+  # its first two choices at all - and those are the ones the LLM exists for.
+  # These are NOT related to agreement.lightgbm_auto_accept_threshold: this is
+  # an uncalibrated within-shortlist margin, that is a calibrated probability
+  # for a different question. Never copy one into the other.
+  # No human competitor labels exist yet, so these are unvalidated. Revisit
+  # them once review_staging_per_target has collected ground truth.
+  clear_margin_threshold: 0.0
+  clear_gap_threshold: 2.0
+  # Retained for the lower-level decisions API. Production wiring does NOT
+  # read it: the single global switch is llm_review.enabled, which decides
+  # whether an adjudicator is constructed at all. With no adjudicator every
+  # ambiguous competitor rejects automatically - never a human queue.
+  llm_adjudication_enabled: false
+  # Ceiling on candidates per adjudication call. The full candidate universe
+  # is never sent - only this many, best-ranked first.
+  llm_max_candidates: 5
+  llm_timeout_seconds: 60.0
 
 runtime:
   random_seed: 42
@@ -101,38 +158,33 @@ ml:
   apply_safety_overrides: true
   continue_shadow_monitoring: true
 
-embedding:
-    enabled: false
-    backend: local_hashing
-    model_name: sku-hashing-384
-    model_version: sklearn-hashing-word-1-2-384-v2
-    batch_size: 64
-    device: cpu
-    similarity_metric: cosine
-    cache_embeddings: true
-    cache_path: ../data/processed/embedding_cache.sqlite3
-    max_sequence_length: 256
-    pooling_strategy: mean
-    normalize_vectors: true
-    local_files_only: true
-    text_construction_version: 2.0.0
-    commercial_parser_version: 1.0.0
-    retrieval_enabled: true
-    retrieval_top_k: 5
-    retrieval_offer_batch_size: 256
-
 agreement:
   require_same_top_candidate: true
-  lightgbm_auto_accept_threshold: 0.85
-  allow_embedding_auto_accept: false
-  minimum_embedding_similarity: null
-  minimum_embedding_margin: null
+  # PROVISIONAL business decision for the first production version. This is a
+  # MODEL SCORE cut-off, not a calibrated probability of correctness: no
+  # independent human-labelled set large enough to calibrate it exists yet
+  # (see docs and the threshold report). At or above it an own-brand match is
+  # accepted automatically; below it the match goes to review.
+  lightgbm_auto_accept_threshold: 0.95
   disagreement_route: llm_review
   weak_agreement_route: llm_review
   hard_conflict_route: manual_review
 
 llm_review:
+  # THE GLOBAL TOGGLE. One switch for both populations - own-brand and
+  # competitor. ON routes every below-threshold offer to Gemini and the run
+  # needs no human to finish. OFF makes no API call at all and sends the
+  # residue to Human Validation.
   enabled: false
+  # Auto-accept cut-offs selected by the toggle above.
+  # MODEL SCORES, NOT PROBABILITIES OF CORRECTNESS. 0.95 does not mean "95%
+  # accurate" and 0.85 does not mean "85% accurate"; neither point has ever
+  # been measured against a human-labelled set. They are operational choices
+  # about how much of the dump to automate. With a reviewer behind it the cut
+  # can afford to be strict; with no reviewer the residue lands on a person,
+  # so it relaxes. Never label these "confidence" on any user-facing surface.
+  on_auto_accept_threshold: 0.95
+  off_auto_accept_threshold: 0.85
   provider: ollama
   model: llama3.1:8b
   endpoint: http://localhost:11434

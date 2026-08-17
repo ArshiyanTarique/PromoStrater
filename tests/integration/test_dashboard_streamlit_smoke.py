@@ -17,6 +17,7 @@ from streamlit.testing.v1 import AppTest
         "dashboard/pages/3_Results_and_Downloads.py",
         "dashboard/pages/4_Models_and_Learning.py",
         "dashboard/pages/5_Al_Kabeer_SKUs.py",
+        "dashboard/pages/6_Competitor_Review.py",
     ],
 )
 def test_streamlit_page_smoke(path: str) -> None:
@@ -166,8 +167,8 @@ def test_processing_action_keeps_normal_primary_button_style() -> None:
     assert 'type="primary"' in source
     # The action must stay a real st.button wearing the theme's primary style,
     # never markup imitating one. This used to ban unsafe_allow_html outright,
-    # which also banned the elapsed clock's stylesheet - the ban is on
-    # hand-rolled controls, not on injected CSS.
+    # which also banned the panel's injected CSS - the ban is on hand-rolled
+    # controls, not on stylesheets.
     assert "<button" not in source
     assert "stButton" not in source
 
@@ -179,13 +180,15 @@ def test_processing_action_keeps_normal_primary_button_style() -> None:
         "dashboard/components/sidebar_status.py",
     ],
 )
-def test_live_panels_poll_once_per_second(path: str) -> None:
-    """The elapsed clock renders whole seconds, so the poll must match it.
+def test_live_panels_poll_twice_per_second(path: str) -> None:
+    """The elapsed reading is whole seconds, so the poll must outpace it.
 
-    At a 2s cadence the timer skipped a second on every tick and looked stuck.
-    Both live surfaces resolve the same snapshot, so they must share the
-    interval or one lags the other.
+    Polling on the second itself is not enough: each redraw costs time, the
+    next tick lands late, and the timer skips a number. Both live surfaces
+    resolve the same snapshot, so they must share the interval or one lags the
+    other.
     """
     source = Path(path).read_text(encoding="utf-8")
-    assert 'run_every="1s"' in source, f"{path} lost its 1s poll"
-    assert 'run_every="2s"' not in source, f"{path} regressed to a 2s poll"
+    assert 'run_every="0.5s"' in source, f"{path} lost its 0.5s poll"
+    for slower in ('run_every="1s"', 'run_every="2s"'):
+        assert slower not in source, f"{path} regressed to {slower}"

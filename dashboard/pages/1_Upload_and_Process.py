@@ -10,13 +10,6 @@ import streamlit as st
 from dashboard.bootstrap import load_dashboard_context
 from dashboard.components.common import safe_page_link
 from dashboard.components.dismiss import dismiss_button
-from dashboard.components.elapsed_clock import (
-    CLOCK_CSS,
-    ELAPSED_CLOCK_KEY,
-    caption_line_html,
-    clock_anchor_css,
-    metric_clock_css,
-)
 from dashboard.components.pipeline_flow import render_pipeline_flow
 from dashboard.components.run_status import (
     current_status,
@@ -34,6 +27,7 @@ from dashboard.services.processing_service import DashboardProcessRequest
 from dashboard.services.upload_service import UploadValidationError
 from dashboard.theme import inject_theme
 from sku_mapping.constants import MLDeploymentMode
+from sku_mapping.matching.routing import RoutingMode
 
 LOGGER = logging.getLogger(__name__)
 
@@ -144,23 +138,46 @@ with st.container(border=True):
         status_label = "Assisted mode" if mode_value == "assisted" else "Shadow evaluation only"
         st.caption(f"Version: **{selected_model.model_version}** · Mode: {status_label}")
 
-    col_toggle1, col_toggle2 = st.columns(2)
-    with col_toggle1:
-        enable_embedding = st.toggle(
-            "Request local embeddings",
-            value=config.embedding.enabled,
-            disabled=is_running,
-            key="enable_embedding",
-            help="Records actual availability in run summary.",
-        )
-    with col_toggle2:
+    # ONE switch for both populations. Own-brand and competitor offers run the
+    # same engine, so a per-population toggle would only let the two drift.
+    st.markdown("**Matching Mode**")
+    mode_columns = st.columns([1, 2])
+    with mode_columns[0]:
         enable_llm = st.toggle(
-            "Request local LLM review",
+            "Gemini Review",
             value=config.llm_review.enabled,
             disabled=is_running,
             key="enable_llm",
-            help="Records LLM reviewer availability and calls.",
+            help=(
+                "One switch for both Al Kabeer and competitor offers. It "
+                "changes the auto-accept cut-off and where below-cut-off "
+                "offers go. Candidate generation and model scoring are "
+                "identical either way."
+            ),
         )
+    active_mode = RoutingMode.from_toggle(
+        enable_llm,
+        llm_on_threshold=config.llm_review.on_auto_accept_threshold,
+        llm_off_threshold=config.llm_review.off_auto_accept_threshold,
+    )
+    with mode_columns[1]:
+        # Deliberately "model score", never "confidence" or "% accuracy": the
+        # thresholds are operational cut-offs and nothing here has measured
+        # accuracy at either point.
+        if active_mode.llm_review_enabled:
+            st.success(
+                f"**ON** · Auto-accept model score "
+                f"**{active_mode.auto_accept_threshold:.2f}** · "
+                "Below threshold: **Gemini Review** (no human needed)",
+                icon="🤖",
+            )
+        else:
+            st.info(
+                f"**OFF** · Auto-accept model score "
+                f"**{active_mode.auto_accept_threshold:.2f}** · "
+                "Below threshold: **Human Validation** · No Gemini calls",
+                icon="👤",
+            )
 
     allow_duplicate = st.checkbox(
         "Explicitly confirm reprocessing identical file bytes",
@@ -211,7 +228,6 @@ if start_clicked and upload is not None:
                 deployment_mode=MLDeploymentMode(str(mode_value)),
                 model_id=model_id,
                 allow_duplicate=allow_duplicate,
-                enable_embedding=enable_embedding,
                 enable_llm_review=enable_llm,
             ),
             source_file_hash=identity.source_file_hash,
@@ -229,16 +245,7 @@ if start_clicked and upload is not None:
 def render_run_facts(status: PipelineStatus) -> None:
     """Draw the shared facts, in the same wording the sidebar uses."""
     facts = status_facts(status)
-    # The clock's stylesheet rides along with a line that is drawn anyway. A
-    # style-only markdown call would open an empty block and space the panel
-    # out; pipeline_flow ships its own CSS the same way.
-    st.markdown(
-        CLOCK_CSS
-        + clock_anchor_css(status.elapsed_seconds, live=status.is_active)
-        + metric_clock_css(live=status.is_active)
-        + caption_line_html("File:", facts["File"]),
-        unsafe_allow_html=True,
-    )
+    st.caption(f"**File:** {facts['File']}")
     render_pipeline_flow(
         stage_key=status.stage_key,
         overall_percent=status.percent,
@@ -249,24 +256,25 @@ def render_run_facts(status: PipelineStatus) -> None:
     s1.metric("Status", facts["Status"])
     s2.metric("Stage", facts["Stage"])
     s3.metric("Progress", facts["Progress"])
-    # A real metric, whose value text the CSS above swaps for a live counter
-    # while the run is active. It is phase-locked to the same elapsed value the
-    # sidebar's clock uses, so the two read identically at every instant.
-    with s4.container(key=ELAPSED_CLOCK_KEY):
-        st.metric("Elapsed", facts["Elapsed"])
+    # Elapsed is whatever the server measured for this run at this poll:
+    # now - created_at while it is live, created_at -> finished_at once it is
+    # not. It advances because the panel redraws, not because anything on the
+    # client is counting, so it cannot run at its own speed or get ahead.
+    s4.metric("Elapsed", facts["Elapsed"])
 
 
-@st.fragment(run_every="1s")
+@st.fragment(run_every="0.5s")
 def live_run_panel() -> None:
     """Poll the durable job record on its own refresh cycle.
 
     Only this fragment reruns, so the page script never blocks and the panel
     is driven entirely by SQLite - a refresh or a second tab shows the same
-    live state. It resolves the snapshot the sidebar's own 1s fragment
-    resolves, so the two never drift apart between polls.
+    live state. It resolves the snapshot the sidebar's own fragment resolves,
+    so the two never drift apart between polls.
 
-    The 1s interval matches the elapsed clock's whole-second resolution; a
-    slower cycle makes the timer jump two seconds at a time.
+    The interval is half the elapsed reading's whole-second resolution, so a
+    redraw's own cost cannot push the next tick past a second boundary and make
+    the timer skip a number.
     """
     status = current_status(jobs, store)
     if not status.is_active:
