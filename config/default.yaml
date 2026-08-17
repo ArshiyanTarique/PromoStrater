@@ -37,7 +37,13 @@ competitors:
   # candidate, reject one, or override a protein/family/form/pack conflict, and
   # its output is a raw margin - never a competitor probability. Off by default
   # so the pre-ML ordering remains reachable without a code change.
-  ml_reranking_enabled: false
+  # ON: the rules keep finding the relationships (recall), the model only
+  # orders what survived. Measured on a real samosa slice, replacing the rules
+  # with the model outright cut CKSA from 194 competitors to 4 and lost
+  # Biladi entirely - the package is trained on Al Kabeer -> Al Kabeer pairs
+  # and scores rival text out of domain. So it ranks; it never admits or
+  # rejects.
+  ml_reranking_enabled: true
   # Candidates per offer shortlist. 0 adopts the model package's own
   # retrieval_k (20 for ranked-v5), the group size it was trained against.
   ml_shortlist_top_k: 0
@@ -59,7 +65,7 @@ competitors:
   # thresholds below settle the clear cases, and the LLM settles the rest.
   # Anything still unresolved - an LLM refusal, timeout, malformed reply, or
   # invented SKU - REJECTS. Off by default so rules-only stays reachable.
-  automatic_decisions_enabled: false
+  automatic_decisions_enabled: true
   # PROVISIONAL THRESHOLDS - measured, not validated.
   # Taken from an 8,000-row real slice: 2,683 supported relationships over
   # 1,302 competitor offers, 99.1% of them scored by the model.
@@ -74,9 +80,10 @@ competitors:
   # them once review_staging_per_target has collected ground truth.
   clear_margin_threshold: 0.0
   clear_gap_threshold: 2.0
-  # Ask the configured LLM provider about ambiguous offers. Off means every
-  # ambiguous offer rejects. Requires llm_review.provider to be configured and
-  # its API key present in the environment.
+  # Retained for the lower-level decisions API. Production wiring does NOT
+  # read it: the single global switch is llm_review.enabled, which decides
+  # whether an adjudicator is constructed at all. With no adjudicator every
+  # ambiguous competitor rejects automatically - never a human queue.
   llm_adjudication_enabled: false
   # Ceiling on candidates per adjudication call. The full candidate universe
   # is never sent - only this many, best-ranked first.

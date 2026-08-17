@@ -203,10 +203,15 @@ def _competitor_reranker(config: PipelineConfig):
         if shadow.package_reference is not None
         else shadow.registry_path.parent / "registry"
     )
+    # ``shadow_mode.model_id`` is null in the shipped configuration, so asking
+    # for it selected no package and the loader failed closed to None: enabling
+    # ml_reranking_enabled silently changed nothing. The re-ranker must use the
+    # package own-brand inference already loads, which is ``ml.model_id``.
+    model_id = config.ml.model_id or shadow.model_id
     reranker = load_competitor_reranker(
         registry_path=shadow.registry_path,
         model_directory=model_directory,
-        model_id=shadow.model_id,
+        model_id=model_id,
         package_reference=shadow.package_reference,
         require_package_status=shadow.require_package_status,
         strip_brand=getattr(competitors, "brand_stripping_enabled", True),
@@ -217,6 +222,55 @@ def _competitor_reranker(config: PipelineConfig):
             "be loaded; competitor discovery will use rule ordering"
         )
     return reranker
+
+
+def _competitor_adjudicator(config: PipelineConfig):
+    """Build the competitor LLM adjudicator, or ``None`` when it must not run.
+
+    The global ``llm_review.enabled`` toggle is the only switch. When it is
+    off no provider is constructed, no API key is read, and no call is made;
+    ambiguous competitor offers then take the conservative automatic route in
+    :mod:`sku_mapping.competitors.policy`, which is REJECT. There is never a
+    human queue for competitors.
+    """
+    llm = config.llm_review
+    if not getattr(llm, "enabled", False):
+        return None
+    from sku_mapping.competitors.adjudicator import CompetitorAdjudicator
+
+    provider_name = str(getattr(llm, "provider", "")).strip().lower()
+    try:
+        if provider_name == "gemini":
+            from sku_mapping.llm_review.gemini import GeminiProvider
+
+            provider = GeminiProvider(configured_model=llm.model)
+        else:
+            from sku_mapping.llm_review.provider import OllamaProvider
+
+            provider = OllamaProvider(
+                model=llm.model,
+                endpoint=str(llm.endpoint),
+                timeout_seconds=float(llm.timeout_seconds),
+            )
+    except Exception:
+        # A missing API key or bad endpoint must not fail the run. Competitor
+        # ambiguity then rejects conservatively, which is the same safe
+        # direction every other provider failure takes.
+        LOGGER.warning(
+            "Competitor LLM adjudication is enabled but no provider could be "
+            "constructed; ambiguous competitors will reject automatically",
+            exc_info=True,
+        )
+        return None
+    return CompetitorAdjudicator(
+        provider=provider,
+        timeout_seconds=float(
+            getattr(config.competitors, "llm_timeout_seconds", 60.0)
+        ),
+        max_candidates=int(
+            getattr(config.competitors, "llm_max_candidates", 5)
+        ),
+    )
 
 
 def _runtime_component_summary(
@@ -578,6 +632,7 @@ class DashboardProcessingService:
                 competitor_progress=update_competitors,
                 stage_progress=update_business_stage,
                 competitor_reranker=_competitor_reranker(effective),
+                competitor_adjudicator=_competitor_adjudicator(effective),
                 # ``canonical_offers`` keeps one row per offer identity, which
                 # is what inference needs. Competitor discovery needs the
                 # variant-level rows: a ClickFlyer offer repeats once per

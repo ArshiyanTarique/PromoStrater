@@ -86,6 +86,13 @@ COMPETITOR_LONG_COLUMNS = (
     "competitor_lightgbm_rank",
     "competitor_ranking_source",
     "run_id",
+    # The terminal automatic verdict. Always present so the audit contract does
+    # not change shape with configuration: when automatic decisions are off the
+    # three columns are empty rather than absent, which kept the export
+    # validator and this tuple in agreement.
+    "competitor_decision",
+    "competitor_decision_reason",
+    "competitor_decision_source",
 )
 
 SUPPORTED_COMPETITOR_STATUSES = frozenset({"MATCHED", "AMBIGUOUS"})
@@ -1292,6 +1299,21 @@ def discover_competitors(
     if getattr(config, "automatic_decisions_enabled", False):
         from sku_mapping.competitors.decisions import apply_automatic_decisions
 
+        # The frame is built against COMPETITOR_LONG_COLUMNS, which now carries
+        # the decision columns so the audit contract is config-independent.
+        # apply_automatic_decisions appends its own, so drop the placeholders
+        # first or the frame ends up with each column twice.
+        long_format = long_format.drop(
+            columns=[
+                column
+                for column in (
+                    "competitor_decision",
+                    "competitor_decision_reason",
+                    "competitor_decision_source",
+                )
+                if column in long_format.columns
+            ]
+        )
         long_format, decision_stats = apply_automatic_decisions(
             long_format,
             clear_margin=float(getattr(config, "clear_margin_threshold", 0.0)),
@@ -1301,6 +1323,13 @@ def discover_competitors(
                 getattr(config, "llm_max_candidates", 5)
             ),
         )
+
+    # Guarantee the audit shape regardless of whether decisions ran, so the
+    # export validator sees one contract instead of two.
+    for column in ("competitor_decision", "competitor_decision_reason",
+                   "competitor_decision_source"):
+        if column not in long_format.columns:
+            long_format[column] = None
 
     source_offer_ids = set(
         competitor_pool["_business_offer_id"].map(_safe_text)
@@ -1368,20 +1397,10 @@ def discover_competitors(
         )
     return CompetitorDiscoveryResult(
         export=export,
-        # The canonical columns, in their canonical order, plus the decision
-        # columns when the decision layer ran. Projecting to the tuple alone
-        # would silently drop the very outcome the run was for.
-        long_format=long_format.loc[
-            :,
-            [
-                *COMPETITOR_LONG_COLUMNS,
-                *[
-                    column
-                    for column in DECISION_COLUMNS
-                    if column in long_format.columns
-                ],
-            ],
-        ],
+        # The canonical columns in their canonical order. DECISION_COLUMNS are
+        # part of that tuple now and are always materialised above, so the
+        # audit has one shape whether or not the decision layer ran.
+        long_format=long_format.loc[:, list(COMPETITOR_LONG_COLUMNS)],
         long_format_path=audit_output,
         eligible_target_count=int(len(target_codes)),
         diagnostics=diagnostics,
