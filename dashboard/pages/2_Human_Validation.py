@@ -6,7 +6,11 @@ import pandas as pd
 import streamlit as st
 
 from dashboard.bootstrap import load_dashboard_context
-from dashboard.components.common import select_run
+from dashboard.components.common import (
+    active_run_mode,
+    render_developer_mode_banner,
+    select_run,
+)
 from dashboard.components.formatters import (
     format_enum_label,
     get_status_color,
@@ -38,7 +42,8 @@ render_sidebar_status(store, jobs)
 st.title("Human Validation")
 st.caption("Review proposed own-brand SKU mappings and save durable GOLD labels for future model retraining.")
 
-runs = reviews.runs_with_review_sessions()
+render_developer_mode_banner()
+runs = reviews.runs_with_review_sessions(run_mode=active_run_mode())
 selected_run = select_run(
     runs,
     key="validation_run",

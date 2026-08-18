@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -323,6 +323,42 @@ MIGRATIONS: dict[int, str] = {
         ALTER TABLE offer_decisions DROP COLUMN embedding_failure_reason;
         ALTER TABLE predictions DROP COLUMN embedding_similarity;
         ALTER TABLE pipeline_runs DROP COLUMN embedding_model_id;
+    """,
+    # Developer/production run separation and the cumulative offer ledger.
+    # Two independent needs, one migration, because both exist to let a run
+    # declare which body of state it belongs to.
+    #
+    # ``run_mode`` defaults to 'production' so every run recorded before this
+    # migration keeps the meaning it was created with: they were all real
+    # runs, and backfilling them as developer experiments would rewrite
+    # history the training snapshot depends on.
+    #
+    # ``offer_ledger`` deliberately carries no foreign key to pipeline_runs.
+    # It is cumulative state that must outlive any individual run record --
+    # a CASCADE from a deleted run would silently destroy the incremental
+    # history and send the next weekly load back to a full reprocess.
+    10: """
+        ALTER TABLE pipeline_runs ADD COLUMN run_mode TEXT NOT NULL
+            DEFAULT 'production'
+            CHECK(run_mode IN ('production', 'developer'));
+
+        CREATE TABLE offer_ledger (
+            offer_id TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            master_hash TEXT NOT NULL,
+            is_own_brand INTEGER NOT NULL CHECK(is_own_brand IN (0, 1)),
+            mapped INTEGER NOT NULL CHECK(mapped IN (0, 1)),
+            offer_end_date TEXT,
+            first_seen_run_id TEXT NOT NULL,
+            last_mapped_run_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_offer_ledger_last_run
+            ON offer_ledger(last_mapped_run_id);
+        CREATE INDEX idx_offer_ledger_pending
+            ON offer_ledger(is_own_brand, mapped);
     """,
 }
 

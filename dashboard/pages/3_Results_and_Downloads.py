@@ -5,7 +5,11 @@ from __future__ import annotations
 import streamlit as st
 
 from dashboard.bootstrap import load_dashboard_context
-from dashboard.components.common import select_run
+from dashboard.components.common import (
+    active_run_mode,
+    render_developer_mode_banner,
+    select_run,
+)
 from dashboard.components.formatters import format_enum_label, get_status_color, render_badge
 from dashboard.components.sidebar_status import render_sidebar_status
 from dashboard.services.job_state import (
@@ -25,8 +29,9 @@ render_sidebar_status(store, jobs)
 st.title("Results & Downloads")
 st.caption("Inspect pipeline metrics, decision distributions, and download validated output datasets.")
 
+render_developer_mode_banner()
 selected = select_run(
-    run_service.runs(),
+    run_service.runs(run_mode=active_run_mode()),
     key="results_run",
     preferred_run_id=st.session_state.get("active_run_id"),
 )

@@ -38,6 +38,13 @@ from sku_mapping.data.preprocessing import (
     preprocess_product_master,
 )
 from sku_mapping.exports.business_outputs import build_business_outputs
+from sku_mapping.incremental import (
+    CumulativeState,
+    IncrementalStateStore,
+    master_fingerprint,
+    plan_incremental_inference,
+    replace_by_offer,
+)
 from sku_mapping.exports.run_outputs import write_run_outputs
 from sku_mapping.failure_diagnostics import (
     capture_exception_details,
@@ -47,7 +54,11 @@ from sku_mapping.inference.pipeline import (
     UnifiedInferenceResult,
     run_unified_inference_non_blocking,
 )
-from sku_mapping.learning.store import LearningStore
+from sku_mapping.learning.store import (
+    PRODUCTION_RUN_MODE,
+    RUN_MODES,
+    LearningStore,
+)
 
 LOGGER = logging.getLogger(__name__)
 _PROCESS_START_LOCK = threading.Lock()
@@ -134,6 +145,19 @@ class DashboardProcessRequest:
     model_id: str
     allow_duplicate: bool = False
     enable_llm_review: bool = False
+    #: Which body of state this run belongs to. Production runs feed the
+    #: business outputs, the incremental ledger and the training snapshot.
+    #: Developer runs execute every identical code path - including review
+    #: staging - but write to their own output tree and stay out of the
+    #: production listings unless asked for by name.
+    run_mode: str = PRODUCTION_RUN_MODE
+
+    def __post_init__(self) -> None:
+        if self.run_mode not in RUN_MODES:
+            raise ValueError(
+                f"unknown run_mode {self.run_mode!r}; expected one of "
+                f"{RUN_MODES}"
+            )
 
 
 @dataclass(frozen=True)
@@ -144,6 +168,104 @@ class DashboardProcessResult:
     status: str
     summary: dict[str, object]
     review_session_id: str | None
+
+
+def _ledger_records(
+    canonical_offers: pd.DataFrame,
+    decisions: pd.DataFrame,
+    *,
+    content_hashes: Mapping[str, str],
+    master_hash: str,
+) -> list[dict[str, object]]:
+    """Describe every offer in this dump for the cumulative ledger.
+
+    ``mapped`` is read from the decisions rather than from the export,
+    because it drives whether a future run reconsiders the offer when the
+    Product Master grows. An offer recorded as mapped when it was not would
+    never be looked at again.
+    """
+    mapped_offers: set[str] = set()
+    if not decisions.empty and "offer_id" in decisions.columns:
+        sku_columns = [
+            column
+            for column in ("final_master_sku", "matched_master_sku")
+            if column in decisions.columns
+        ]
+        for record in decisions.to_dict(orient="records"):
+            offer_id = str(record.get("offer_id") or "").strip()
+            if not offer_id:
+                continue
+            for column in sku_columns:
+                value = str(record.get(column) or "").strip()
+                if value and value.upper() not in {
+                    "NAN",
+                    "NONE",
+                    "NO_MATCH",
+                    "REVIEW_REQUIRED",
+                }:
+                    mapped_offers.add(offer_id)
+                    break
+
+    end_dates: dict[str, str] = {}
+    if "Offer End Date" in canonical_offers.columns:
+        for identity, value in zip(
+            canonical_offers["offer_group_id"].astype(str),
+            canonical_offers["Offer End Date"],
+            strict=True,
+        ):
+            text_value = str(value or "").strip()
+            if text_value and text_value.lower() not in {"nan", "nat", "none"}:
+                end_dates[identity] = text_value
+
+    own_flags = (
+        canonical_offers["is_own"].fillna(False).astype(bool)
+        if "is_own" in canonical_offers.columns
+        else pd.Series(False, index=canonical_offers.index)
+    )
+    records = []
+    for identity, is_own in zip(
+        canonical_offers["offer_group_id"].astype(str), own_flags, strict=True
+    ):
+        records.append(
+            {
+                "offer_id": identity,
+                "content_hash": content_hashes.get(identity, ""),
+                "master_hash": master_hash,
+                "is_own_brand": bool(is_own),
+                "mapped": identity in mapped_offers,
+                "offer_end_date": end_dates.get(identity),
+            }
+        )
+    return records
+
+
+def _latest_offer_end_date(offers: pd.DataFrame) -> str | None:
+    """Report how current the data is, for a human reading the summary.
+
+    Deliberately derived and displayed only. Nothing selects work by date:
+    dumps carry backdated and corrected rows, so a date used as a watermark
+    drops exactly the rows a correction was meant to deliver.
+    """
+    if "Offer End Date" not in offers.columns or offers.empty:
+        return None
+    values = (
+        offers["Offer End Date"].astype("string").fillna("").str.strip()
+    )
+    values = values[values.ne("") & ~values.str.lower().isin(
+        ["nan", "nat", "none"]
+    )]
+    return str(values.max()) if not values.empty else None
+
+
+def _mode_output_root(config: PipelineConfig, run_mode: str) -> Path:
+    """Return the output tree belonging to one run mode.
+
+    Runs were always isolated by ``run_id``, so nothing ever overwrote
+    anything. The split exists so that a person browsing the filesystem - or
+    a script globbing it - cannot mistake a developer experiment for the
+    week's business output.
+    """
+    return Path(config.dashboard.output_directory) / run_mode
 
 
 def _competitor_review_staging(store, business, config: PipelineConfig, run_id: str) -> int:
@@ -363,10 +485,17 @@ class DashboardProcessingService:
             f"{upload.source_file_hash[:12]}"
         )
         with _PROCESS_START_LOCK:
+            # Developer mode never refuses a repeat. Re-running the same
+            # bytes to see what a change did is the entire developer loop,
+            # and a guard that has to be waved away every time is not
+            # protecting anything.
             duplicates = (
                 self.store.active_or_completed_runs_for_source_hash(
-                    upload.source_file_hash
+                    upload.source_file_hash,
+                    run_mode=request.run_mode,
                 )
+                if request.run_mode == PRODUCTION_RUN_MODE
+                else []
             )
             if duplicates and not request.allow_duplicate:
                 raise DuplicateProcessingError(
@@ -379,6 +508,7 @@ class DashboardProcessingService:
                     "source_filename": upload.sanitized_filename,
                     "source_file_hash": upload.source_file_hash,
                     "deployment_mode": request.deployment_mode.value,
+                    "run_mode": request.run_mode,
                     "status": "VALIDATING",
                     "model_id": request.model_id,
                     "threshold": self.config.ml.auto_accept_threshold,
@@ -452,12 +582,77 @@ class DashboardProcessingService:
             master = preprocess_product_master(
                 load_product_master(self.config.data.master_path)
             )
+            # Production runs load incrementally: only offers that are new,
+            # revised, or newly re-mappable against a grown Product Master go
+            # through inference. Developer runs deliberately skip all of it
+            # and reprocess the file in full, which is what makes a developer
+            # run a repeatable experiment rather than a moving target.
+            # Derived from the dashboard output root rather than configured
+            # separately, alongside the existing ``_pipeline`` and
+            # ``_shadow`` trees. Anything that redirects outputs - a test, a
+            # second checkout - redirects cumulative state with it, instead
+            # of silently sharing one global history.
+            incremental_state = IncrementalStateStore(
+                self.config.dashboard.output_directory / "_incremental"
+            )
+            is_incremental = request.run_mode == PRODUCTION_RUN_MODE
+            master_hash = master_fingerprint(master)
+            if is_incremental:
+                cumulative = incremental_state.load()
+                plan = plan_incremental_inference(
+                    canonical_offers=canonical_offers,
+                    own_offers=own,
+                    known_content_hashes=(
+                        self.store.offer_ledger_content_hashes()
+                    ),
+                    unmapped_offer_ids=(
+                        self.store.unmapped_own_brand_offer_ids(
+                            master_hash=master_hash
+                        )
+                    ),
+                    master_hash=master_hash,
+                )
+                # Competitor-brand offers stay in every run. Their decision
+                # is a single classification with no candidate generation or
+                # scoring behind it, and the pipeline is what records one
+                # terminal decision per canonical offer - dropping them would
+                # put holes in that lifecycle to save nothing.
+                competitor_rows = canonical_offers.loc[
+                    ~canonical_offers["is_own"].fillna(False).astype(bool)
+                ]
+                inference_offers = pd.concat(
+                    [plan.offers, competitor_rows],
+                    ignore_index=True,
+                    sort=False,
+                )
+                inference_offer_count = int(len(plan.offers))
+                run_metadata.update(plan.as_diagnostics())
+                run_metadata["inference_offer_count"] = inference_offer_count
+                run_metadata["inference_scope"] = (
+                    "incremental_own_brand_offers"
+                )
+                tracker.update(
+                    "canonicalisation",
+                    completed=len(raw),
+                    total=len(raw),
+                    detail=(
+                        f"{inference_offer_count:,} offers need inference; "
+                        f"{plan.skipped_offer_count:,} already current"
+                    ),
+                    run_id=run_id,
+                )
+            else:
+                cumulative = CumulativeState(None, None, None)
+                plan = None
+                inference_offers = canonical_offers
+            mode_output_root = _mode_output_root(
+                self.config, request.run_mode
+            )
             effective = replace(
                 self.config,
                 output=replace(
                     self.config.output,
-                    output_dir=self.config.dashboard.output_directory
-                    / "_pipeline",
+                    output_dir=mode_output_root / "_pipeline",
                 ),
                 ml=replace(
                     self.config.ml,
@@ -466,10 +661,7 @@ class DashboardProcessingService:
                 ),
                 shadow_mode=replace(
                     self.config.shadow_mode,
-                    output_directory=(
-                        self.config.dashboard.output_directory
-                        / "_shadow"
-                    ),
+                    output_directory=mode_output_root / "_shadow",
                 ),
                 llm_review=replace(
                     self.config.llm_review,
@@ -485,6 +677,7 @@ class DashboardProcessingService:
                     "source_row_count": len(raw),
                     "unique_offer_count": identity.unique_offer_count,
                     "deployment_mode": request.deployment_mode.value,
+                    "run_mode": request.run_mode,
                     "status": "PROCESSING",
                     "model_id": request.model_id,
                     "threshold": effective.ml.auto_accept_threshold,
@@ -526,7 +719,7 @@ class DashboardProcessingService:
                 )
 
             result = self.pipeline_runner(
-                canonical_offers,
+                inference_offers,
                 master,
                 config=effective,
                 run_id=run_id,
@@ -574,7 +767,7 @@ class DashboardProcessingService:
                 run_id=run_id,
             )
             competitor_audit_path = (
-                self.config.dashboard.output_directory
+                mode_output_root
                 / run_id
                 / f".competitor_long_form_{run_id}.partial.csv"
             )
@@ -622,10 +815,49 @@ class DashboardProcessingService:
                     run_id=run_id,
                 )
 
+            if is_incremental:
+                # Everything inference just returned replaces its stored
+                # counterpart: the own-brand delta plus every competitor row
+                # in this dump.
+                replaced_own = frozenset(
+                    plan.processed_offer_ids
+                    | set(
+                        competitor_rows["offer_group_id"].astype(str)
+                    )
+                )
+                refreshed = set(
+                    canonical_offers["offer_group_id"].astype(str)
+                )
+                cumulative_own_rows = replace_by_offer(
+                    cumulative.own_rows,
+                    result.rows,
+                    key="offer_group_id",
+                    replaced_ids=replaced_own,
+                )
+                cumulative_decisions = replace_by_offer(
+                    cumulative.decisions,
+                    result.decisions,
+                    key="offer_id",
+                    replaced_ids=replaced_own,
+                )
+                # The variant-level pool is refreshed for every offer this
+                # dump carries, not only the inferred ones: the dump is the
+                # newest description of all of them.
+                cumulative_pool = replace_by_offer(
+                    cumulative.pool,
+                    prepared,
+                    key="offer_group_id",
+                    replaced_ids=refreshed,
+                )
+            else:
+                cumulative_own_rows = result.rows
+                cumulative_decisions = result.decisions
+                cumulative_pool = prepared
+
             business = build_business_outputs(
-                result.rows,
+                cumulative_own_rows,
                 master,
-                result.decisions,
+                cumulative_decisions,
                 competitor_config=effective.competitors,
                 run_id=run_id,
                 competitor_audit_path=competitor_audit_path,
@@ -641,7 +873,7 @@ class DashboardProcessingService:
                 # appears solely in ``Variant`` (assorted/mixed competitor
                 # packs) then lose the only evidence tying them to a Master
                 # SKU and are scored as unrelated.
-                competitor_offers=prepared,
+                competitor_offers=cumulative_pool,
             )
             staged = _competitor_review_staging(
                 self.store, business, effective, run_id
@@ -666,6 +898,14 @@ class DashboardProcessingService:
                 "source_filename": upload.sanitized_filename,
                 "source_file_hash": upload.source_file_hash,
                 "deployment_mode": request.deployment_mode.value,
+                "run_mode": request.run_mode,
+                "master_hash": master_hash,
+                "incremental_loading": is_incremental,
+                # Reported, never used to decide what to process. It answers
+                # "how current is this data" for an operator.
+                "data_through_offer_end_date": _latest_offer_end_date(
+                    cumulative_pool
+                ),
                 "operational_threshold": effective.ml.auto_accept_threshold,
                 "threshold_source": "user_configured",
                 "production_threshold_approved": False,
@@ -698,7 +938,7 @@ class DashboardProcessingService:
                     business.competitor_long_format_path
                 ),
                 summary=summary,
-                output_root=self.config.dashboard.output_directory,
+                output_root=mode_output_root,
                 monitoring_path=monitoring_path,
                 progress=lambda completed, total, detail: tracker.update(
                     "exports",
@@ -726,6 +966,21 @@ class DashboardProcessingService:
                     else "COMPLETED_DASHBOARD_SHADOW"
                 ),
             )
+            if is_incremental:
+                incremental_state.save(
+                    pool=cumulative_pool,
+                    own_rows=cumulative_own_rows,
+                    decisions=cumulative_decisions,
+                )
+                self.store.upsert_offer_ledger(
+                    _ledger_records(
+                        canonical_offers,
+                        cumulative_decisions,
+                        content_hashes=plan.content_hashes,
+                        master_hash=master_hash,
+                    ),
+                    run_id=run_id,
+                )
             tracker.update(
                 "persistence",
                 completed=1,
@@ -761,6 +1016,7 @@ class DashboardProcessingService:
             try:
                 log_path = self._write_cancellation_log(
                     run_id,
+                    run_mode=request.run_mode,
                     stage_key=cancellation.stage_key,
                     stage_label=tracker.latest.stage_label,
                     last_completed_stage=(
@@ -811,11 +1067,12 @@ class DashboardProcessingService:
             partial_artifacts = self._collect_partial_artifacts(locals())
             try:
                 log_path = self._write_failure_log(
-                    run_id, technical_details
+                    run_id, technical_details, run_mode=request.run_mode
                 )
                 partial_artifacts.append(str(log_path))
                 report_path = self._write_failure_report(
                     run_id=run_id,
+                    run_mode=request.run_mode,
                     exact_error=exact_error,
                     failed_stage=tracker.latest.stage_label,
                     pipeline_status=pipeline_status,
@@ -881,6 +1138,7 @@ class DashboardProcessingService:
         self,
         run_id: str,
         *,
+        run_mode: str,
         stage_key: str | None,
         stage_label: str | None,
         last_completed_stage: str | None,
@@ -888,7 +1146,7 @@ class DashboardProcessingService:
         partial_artifacts: tuple[str, ...],
     ) -> Path:
         """Preserve an auditable record of where the run stopped."""
-        directory = self.config.dashboard.output_directory / run_id
+        directory = _mode_output_root(self.config, run_mode) / run_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "cancellation_report.json"
         path.write_text(
@@ -915,9 +1173,9 @@ class DashboardProcessingService:
         return path
 
     def _write_failure_log(
-        self, run_id: str, technical_details: str
+        self, run_id: str, technical_details: str, *, run_mode: str
     ) -> Path:
-        directory = self.config.dashboard.output_directory / run_id
+        directory = _mode_output_root(self.config, run_mode) / run_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "internal_failure.log"
         path.write_text(technical_details, encoding="utf-8")
@@ -927,6 +1185,7 @@ class DashboardProcessingService:
         self,
         *,
         run_id: str,
+        run_mode: str,
         exact_error: str,
         failed_stage: str | None,
         pipeline_status: str,
@@ -935,7 +1194,7 @@ class DashboardProcessingService:
         technical_log: Path,
         partial_artifacts: tuple[str, ...],
     ) -> Path:
-        directory = self.config.dashboard.output_directory / run_id
+        directory = _mode_output_root(self.config, run_mode) / run_id
         path = directory / "failure_report.json"
         path.write_text(
             json.dumps(

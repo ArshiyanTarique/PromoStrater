@@ -1,0 +1,47 @@
+# PromoStrater dashboard, managed by systemd.
+#
+# Streamlit is not CGI: the app IS the server process, so something has to keep
+# it alive. systemd starts it at boot, restarts it if it crashes, and keeps it
+# running after the SSH session that installed it has gone.
+#
+# Install (Ubuntu, app checked out at /home/ubuntu/PromoStrater):
+#   sudo cp deploy/promostrater.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now promostrater
+#
+# Check it:      sudo systemctl status promostrater
+# Read logs:     sudo journalctl -u promostrater -f
+# Restart after a code change (the file watcher is off by design):
+#                sudo systemctl restart promostrater
+
+[Unit]
+Description=PromoStrater SKU mapping dashboard
+# Wait for networking, or binding 0.0.0.0 can fail on a cold boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# Change all three paths together if the checkout lives somewhere else.
+WorkingDirectory=/home/ubuntu/PromoStrater
+Environment=PYTHONUNBUFFERED=1
+# Uncomment and set when the Gemini reviewer is switched on. Keep the key here
+# rather than in config/default.yaml, which is committed.
+# Environment=GEMINI_API_KEY=
+
+ExecStart=/home/ubuntu/PromoStrater/.venv/bin/python -m streamlit run \
+    dashboard/Dashboard.py \
+    --server.port 8501 \
+    --server.address 0.0.0.0 \
+    --server.headless true
+
+# A run can take over an hour, so never kill the process for being busy.
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

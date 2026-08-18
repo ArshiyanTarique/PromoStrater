@@ -258,7 +258,7 @@ def _status_from_latest_run(store: "LearningStore") -> PipelineStatus:
     ``IDLE``: without a job record there is no evidence anything owns it, and
     claiming otherwise is how the sidebar used to advertise a dead run forever.
     """
-    runs = store.list_pipeline_runs(limit=1)
+    runs = store.list_pipeline_runs(limit=1, run_mode=None)
     if not runs:
         return PipelineStatus(phase=PipelinePhase.IDLE)
     run = runs[0]

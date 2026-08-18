@@ -12,7 +12,10 @@ import pandas as pd
 from sku_mapping.competitors.discovery import COMPETITOR_EXPORT_COLUMNS
 from sku_mapping.config import PipelineConfig
 from sku_mapping.exports.run_outputs import SKU_MAPPING_COLUMNS
-from sku_mapping.learning.store import LearningStore
+from sku_mapping.learning.store import (
+    PRODUCTION_RUN_MODE,
+    LearningStore,
+)
 
 
 @dataclass(frozen=True)
@@ -76,8 +79,10 @@ class DashboardRunService:
         self.config = config
         self.store = store
 
-    def runs(self) -> list[dict[str, object]]:
-        return self.store.list_pipeline_runs(limit=200)
+    def runs(
+        self, *, run_mode: str | None = PRODUCTION_RUN_MODE
+    ) -> list[dict[str, object]]:
+        return self.store.list_pipeline_runs(limit=200, run_mode=run_mode)
 
     def run_summary(self, run_id: str) -> dict[str, object]:
         run = self.store.get_pipeline_run(run_id)

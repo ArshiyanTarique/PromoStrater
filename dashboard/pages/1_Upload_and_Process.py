@@ -8,7 +8,13 @@ import os
 import streamlit as st
 
 from dashboard.bootstrap import load_dashboard_context
-from dashboard.components.common import safe_page_link
+from sku_mapping.learning.store import DEVELOPER_RUN_MODE
+from dashboard.components.common import (
+    DEVELOPER_MODE_SESSION_KEY,
+    active_run_mode,
+    render_developer_mode_banner,
+    safe_page_link,
+)
 from dashboard.components.dismiss import dismiss_button
 from dashboard.components.pipeline_flow import render_pipeline_flow
 from dashboard.components.run_status import (
@@ -179,6 +185,42 @@ with st.container(border=True):
                 icon="👤",
             )
 
+    # Developer mode changes which body of state a run belongs to, not
+    # which code runs. A developer run executes the entire pipeline -
+    # candidate generation, scoring, Gemini review, review staging - and
+    # differs only in where its outputs land and whose listings it appears
+    # in. That is what makes it a usable rehearsal of the real thing.
+    st.markdown("**Run Mode**")
+    mode_row = st.columns([1, 2])
+    with mode_row[0]:
+        st.toggle(
+            "Developer mode",
+            disabled=is_running,
+            key=DEVELOPER_MODE_SESSION_KEY,
+            help=(
+                "Run the full pipeline without touching production state. "
+                "Outputs go to the developer tree, the run stays out of the "
+                "business views, and the incremental ledger is neither read "
+                "nor advanced - so repeated runs on the same file always "
+                "reprocess it in full."
+            ),
+        )
+    with mode_row[1]:
+        if active_run_mode() == DEVELOPER_RUN_MODE:
+            st.warning(
+                "**DEVELOPER** · Outputs: `outputs/dashboard_runs/developer/` "
+                "· Always reprocesses in full · Excluded from training by "
+                "default",
+                icon="🛠️",
+            )
+        else:
+            st.success(
+                "**PRODUCTION** · Outputs: "
+                "`outputs/dashboard_runs/production/` · Processes only "
+                "unseen offers · Feeds the business views",
+                icon="🏭",
+            )
+
     allow_duplicate = st.checkbox(
         "Explicitly confirm reprocessing identical file bytes",
         value=False,
@@ -197,8 +239,16 @@ if upload is not None:
             c2.caption(f"**Size:** {identity.size_bytes:,} bytes")
             c3.caption(f"**SHA-256:** `{identity.source_file_hash[:16]}...`")
             
-        duplicate_runs = store.active_or_completed_runs_for_source_hash(
-            identity.source_file_hash
+        # Scoped to the active mode: re-running the same bytes is the
+        # normal developer loop and must not be blocked by, or block, the
+        # production run of that file.
+        duplicate_runs = (
+            store.active_or_completed_runs_for_source_hash(
+                identity.source_file_hash,
+                run_mode=active_run_mode(),
+            )
+            if active_run_mode() != DEVELOPER_RUN_MODE
+            else []
         )
         if duplicate_runs and not allow_duplicate:
             st.warning(
@@ -229,6 +279,7 @@ if start_clicked and upload is not None:
                 model_id=model_id,
                 allow_duplicate=allow_duplicate,
                 enable_llm_review=enable_llm,
+                run_mode=active_run_mode(),
             ),
             source_file_hash=identity.source_file_hash,
         )

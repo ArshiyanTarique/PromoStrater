@@ -32,6 +32,41 @@ class DuplicateHumanReviewError(LearningStoreError):
     """Raised when a persisted question has already been answered."""
 
 
+#: A run belongs to exactly one body of state. Production runs feed the
+#: business outputs, the incremental ledger and the training snapshot;
+#: developer runs exercise the identical code paths but stay out of all
+#: three unless a caller asks for them by name.
+PRODUCTION_RUN_MODE = "production"
+DEVELOPER_RUN_MODE = "developer"
+RUN_MODES = (PRODUCTION_RUN_MODE, DEVELOPER_RUN_MODE)
+
+
+def _validated_run_mode(value: Any) -> str:
+    """Return a known run mode, refusing to invent one.
+
+    Absent means production: every run recorded before run modes existed was
+    a real one, and the schema default backfills them the same way. An
+    unrecognised mode is a programming error rather than something to
+    normalise, because guessing here is exactly how a developer experiment
+    would acquire production's trust.
+    """
+    if value is None or not str(value).strip():
+        return PRODUCTION_RUN_MODE
+    mode = str(value).strip()
+    if mode not in RUN_MODES:
+        raise LearningStoreError(
+            f"unknown run_mode {mode!r}; expected one of {RUN_MODES}"
+        )
+    return mode
+
+
+def _run_mode_predicate(run_mode: str | None) -> tuple[str, tuple[str, ...]]:
+    """Build the run-mode SQL fragment. ``None`` means every mode."""
+    if run_mode is None:
+        return "", ()
+    return "run_mode = ?", (_validated_run_mode(run_mode),)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -204,12 +239,30 @@ class LearningStore:
                 connection.close()
 
     def list_pipeline_runs(
-        self, *, completed_only: bool = False, limit: int = 100
+        self,
+        *,
+        completed_only: bool = False,
+        limit: int = 100,
+        run_mode: str | None = PRODUCTION_RUN_MODE,
     ) -> list[dict[str, Any]]:
-        """List recent runs for durable dashboard navigation."""
+        """List recent runs for durable dashboard navigation.
+
+        Defaults to production runs. A caller that never considered run modes
+        therefore cannot surface a developer experiment as the business view;
+        it sees an empty list instead, which fails visibly. Pass
+        ``run_mode=None`` to list every mode.
+        """
         if limit < 1 or limit > 1000:
             raise LearningStoreError("run list limit must be within [1, 1000]")
-        where = "WHERE status LIKE 'COMPLETED%'" if completed_only else ""
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if completed_only:
+            clauses.append("status LIKE 'COMPLETED%'")
+        mode_clause, mode_parameters = _run_mode_predicate(run_mode)
+        if mode_clause:
+            clauses.append(mode_clause)
+            parameters.extend(mode_parameters)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             connection = self._connect()
             try:
@@ -220,44 +273,60 @@ class LearningStore:
                     ORDER BY COALESCE(completed_at, started_at) DESC, run_id
                     LIMIT ?
                     """,
-                    (limit,),
+                    (*parameters, limit),
                 ).fetchall()
                 return [self._decode_run(row) for row in rows]
             finally:
                 connection.close()
 
     def completed_runs_for_source_hash(
-        self, source_file_hash: str
+        self,
+        source_file_hash: str,
+        *,
+        run_mode: str | None = PRODUCTION_RUN_MODE,
     ) -> list[dict[str, Any]]:
         """Return completed runs matching an exact uploaded-byte hash."""
         if len(source_file_hash) != 64:
             raise LearningStoreError("source_file_hash must be SHA-256")
+        mode_clause, mode_parameters = _run_mode_predicate(run_mode)
+        mode_sql = f" AND {mode_clause}" if mode_clause else ""
         with self._lock:
             connection = self._connect()
             try:
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT * FROM pipeline_runs
                     WHERE source_file_hash = ? AND status LIKE 'COMPLETED%'
+                    {mode_sql}
                     ORDER BY completed_at DESC, run_id
                     """,
-                    (source_file_hash,),
+                    (source_file_hash, *mode_parameters),
                 ).fetchall()
                 return [self._decode_run(row) for row in rows]
             finally:
                 connection.close()
 
     def active_or_completed_runs_for_source_hash(
-        self, source_file_hash: str
+        self,
+        source_file_hash: str,
+        *,
+        run_mode: str | None = PRODUCTION_RUN_MODE,
     ) -> list[dict[str, Any]]:
-        """Find duplicates that are processing or already completed."""
+        """Find duplicates that are processing or already completed.
+
+        Scoped to one run mode by default. Re-running identical bytes is the
+        normal developer loop, so a developer run must not be blocked by the
+        production run of the same file, nor the reverse.
+        """
         if len(source_file_hash) != 64:
             raise LearningStoreError("source_file_hash must be SHA-256")
+        mode_clause, mode_parameters = _run_mode_predicate(run_mode)
+        mode_sql = f" AND {mode_clause}" if mode_clause else ""
         with self._lock:
             connection = self._connect()
             try:
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT * FROM pipeline_runs
                     WHERE source_file_hash = ?
                       AND (
@@ -266,9 +335,10 @@ class LearningStore:
                             'PROCESSING', 'VALIDATING', 'CANCELLING'
                         )
                       )
+                      {mode_sql}
                     ORDER BY COALESCE(completed_at, started_at) DESC, run_id
                     """,
-                    (source_file_hash,),
+                    (source_file_hash, *mode_parameters),
                 ).fetchall()
                 return [self._decode_run(row) for row in rows]
             finally:
@@ -609,6 +679,180 @@ class LearningStore:
             ).fetchone()
             return self._decode_job(row) if row is not None else None
 
+    # ------------------------------------------------------------------
+    # Cumulative offer ledger
+    #
+    # The ledger records what has already been through inference, so a weekly
+    # load only pays for offers it has not seen. It is keyed on the canonical
+    # ``offer_group_id`` rather than on a date: dumps arrive with backdated
+    # and corrected rows, and a date watermark would drop those silently and
+    # permanently. Only production runs read or write it.
+    # ------------------------------------------------------------------
+
+    def offer_ledger_content_hashes(self) -> dict[str, str]:
+        """Map every ledgered offer id to the content hash last processed.
+
+        The hash is what separates "seen this offer" from "seen this version
+        of this offer": a corrected price under an unchanged ``offerid`` must
+        go back through inference rather than be skipped as already known.
+        """
+        with self._lock:
+            connection = self._connect()
+            try:
+                rows = connection.execute(
+                    "SELECT offer_id, content_hash FROM offer_ledger"
+                ).fetchall()
+                return {
+                    str(row["offer_id"]): str(row["content_hash"])
+                    for row in rows
+                }
+            finally:
+                connection.close()
+
+    def unmapped_own_brand_offer_ids(
+        self, *, master_hash: str | None = None
+    ) -> set[str]:
+        """Return own-brand offers the pipeline has never mapped.
+
+        When ``master_hash`` is supplied, only offers last evaluated against a
+        different Product Master are returned. New master SKUs are exactly the
+        reason a previously unmatched offer deserves another attempt, and
+        nothing else in the ledger would ever bring it back.
+        """
+        clauses = ["is_own_brand = 1", "mapped = 0"]
+        parameters: list[Any] = []
+        if master_hash is not None:
+            clauses.append("master_hash != ?")
+            parameters.append(str(master_hash))
+        predicate = " AND ".join(clauses)
+        with self._lock:
+            connection = self._connect()
+            try:
+                rows = connection.execute(
+                    f"SELECT offer_id FROM offer_ledger WHERE {predicate}",
+                    tuple(parameters),
+                ).fetchall()
+                return {str(row["offer_id"]) for row in rows}
+            finally:
+                connection.close()
+
+    def offer_ledger_watermark(self) -> dict[str, Any]:
+        """Summarise ledger coverage for operator display.
+
+        ``latest_offer_end_date`` is reported, never used to decide what to
+        process. It answers "how current is this data" for a human; the
+        content hashes decide the work.
+        """
+        with self._lock:
+            connection = self._connect()
+            try:
+                row = connection.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS offer_count,
+                        COALESCE(SUM(is_own_brand), 0) AS own_brand_count,
+                        COALESCE(SUM(mapped), 0) AS mapped_count,
+                        MAX(offer_end_date) AS latest_offer_end_date,
+                        MAX(updated_at) AS last_updated_at
+                    FROM offer_ledger
+                    """
+                ).fetchone()
+                return {
+                    "offer_count": int(row["offer_count"] or 0),
+                    "own_brand_count": int(row["own_brand_count"] or 0),
+                    "mapped_count": int(row["mapped_count"] or 0),
+                    "latest_offer_end_date": row["latest_offer_end_date"],
+                    "last_updated_at": row["last_updated_at"],
+                }
+            finally:
+                connection.close()
+
+    def upsert_offer_ledger(
+        self, records: Iterable[Mapping[str, Any]], *, run_id: str
+    ) -> int:
+        """Record processed offers, preserving when each was first seen."""
+        if not str(run_id).strip():
+            raise LearningStoreError("offer ledger requires run_id")
+        now = _now()
+        prepared: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in records:
+            offer_id = str(raw.get("offer_id") or "").strip()
+            if not offer_id:
+                raise LearningStoreError("ledger entry requires offer_id")
+            if offer_id in seen:
+                raise LearningStoreError(
+                    f"duplicate ledger entry {offer_id!r}"
+                )
+            seen.add(offer_id)
+            content_hash = str(raw.get("content_hash") or "").strip()
+            if not content_hash:
+                raise LearningStoreError(
+                    f"ledger entry {offer_id!r} requires content_hash"
+                )
+            prepared.append(
+                {
+                    "offer_id": offer_id,
+                    "content_hash": content_hash,
+                    "master_hash": str(raw.get("master_hash") or ""),
+                    "is_own_brand": 1 if raw.get("is_own_brand") else 0,
+                    "mapped": 1 if raw.get("mapped") else 0,
+                    "offer_end_date": (
+                        str(raw["offer_end_date"])
+                        if raw.get("offer_end_date")
+                        else None
+                    ),
+                    "run_id": str(run_id),
+                    "now": now,
+                }
+            )
+        if not prepared:
+            return 0
+        with self._lock:
+            connection = self._connect()
+            try:
+                with connection:
+                    connection.executemany(
+                        """
+                        INSERT INTO offer_ledger (
+                            offer_id, content_hash, master_hash,
+                            is_own_brand, mapped, offer_end_date,
+                            first_seen_run_id, last_mapped_run_id,
+                            created_at, updated_at
+                        ) VALUES (
+                            :offer_id, :content_hash, :master_hash,
+                            :is_own_brand, :mapped, :offer_end_date,
+                            :run_id, :run_id, :now, :now
+                        )
+                        ON CONFLICT(offer_id) DO UPDATE SET
+                            content_hash=excluded.content_hash,
+                            master_hash=excluded.master_hash,
+                            is_own_brand=excluded.is_own_brand,
+                            mapped=excluded.mapped,
+                            offer_end_date=COALESCE(
+                                excluded.offer_end_date,
+                                offer_ledger.offer_end_date
+                            ),
+                            last_mapped_run_id=excluded.last_mapped_run_id,
+                            updated_at=excluded.updated_at
+                        """,
+                        prepared,
+                    )
+            finally:
+                connection.close()
+        return len(prepared)
+
+    def reset_offer_ledger(self) -> int:
+        """Empty the ledger so the next production run reprocesses in full."""
+        with self._lock:
+            connection = self._connect()
+            try:
+                with connection:
+                    cursor = connection.execute("DELETE FROM offer_ledger")
+                    return int(cursor.rowcount or 0)
+            finally:
+                connection.close()
+
     def latest_processing_job_for_run(
         self, run_id: str
     ) -> dict[str, Any] | None:
@@ -787,6 +1031,7 @@ class LearningStore:
             "deployment_mode": str(
                 values.get("deployment_mode") or "unknown"
             ),
+            "run_mode": _validated_run_mode(values.get("run_mode")),
             "status": str(values.get("status") or "STARTED"),
             "model_id": values.get("model_id"),
             "llm_model_id": values.get("llm_model_id"),
@@ -812,8 +1057,8 @@ class LearningStore:
                         INSERT INTO pipeline_runs (
                             run_id, started_at, completed_at, source_filename,
                             source_file_hash, source_row_count,
-                            unique_offer_count, deployment_mode, status,
-                            model_id, llm_model_id,
+                            unique_offer_count, deployment_mode, run_mode,
+                            status, model_id, llm_model_id,
                             threshold, output_paths_json,
                             stage_runtimes_json, run_metadata_json,
                             error_summary, created_at
@@ -821,8 +1066,8 @@ class LearningStore:
                             :run_id, :started_at, :completed_at,
                             :source_filename, :source_file_hash,
                             :source_row_count, :unique_offer_count,
-                            :deployment_mode, :status, :model_id,
-                            :llm_model_id, :threshold,
+                            :deployment_mode, :run_mode, :status,
+                            :model_id, :llm_model_id, :threshold,
                             :output_paths_json, :stage_runtimes_json,
                             :run_metadata_json, :error_summary, :created_at
                         )
@@ -1595,13 +1840,21 @@ class LearningStore:
             finally:
                 connection.close()
 
-    def count_new_gold_labels_since_last_model(self) -> int:
+    def count_new_gold_labels_since_last_model(
+        self, *, run_mode: str | None = PRODUCTION_RUN_MODE
+    ) -> int:
         """Count GOLD answers newer than the latest explicit activation.
 
         Training or rejecting a challenger does not consume the GOLD-label
         trigger. Before the first Phase 7C activation, every GOLD answer is
         considered new.
+
+        Counts production answers only by default. This number is the
+        retraining gate, so counting developer rehearsals here would let a
+        throwaway experiment argue that the champion is due for replacement.
         """
+        mode_clause, mode_parameters = _run_mode_predicate(run_mode)
+        mode_sql = f" AND r.{mode_clause}" if mode_clause else ""
         with self._lock:
             connection = self._connect()
             try:
@@ -1610,18 +1863,24 @@ class LearningStore:
                 ).fetchone()[0]
                 if latest is None:
                     row = connection.execute(
-                        """
-                        SELECT COUNT(*) FROM human_reviews
-                        WHERE label_quality = 'GOLD'
-                        """
+                        f"""
+                        SELECT COUNT(*) FROM human_reviews h
+                        JOIN pipeline_runs r ON r.run_id = h.run_id
+                        WHERE h.label_quality = 'GOLD'
+                        {mode_sql}
+                        """,
+                        tuple(mode_parameters),
                     ).fetchone()
                 else:
                     row = connection.execute(
-                        """
-                        SELECT COUNT(*) FROM human_reviews
-                        WHERE label_quality = 'GOLD' AND answered_at > ?
+                        f"""
+                        SELECT COUNT(*) FROM human_reviews h
+                        JOIN pipeline_runs r ON r.run_id = h.run_id
+                        WHERE h.label_quality = 'GOLD'
+                          AND h.answered_at > ?
+                        {mode_sql}
                         """,
-                        (latest,),
+                        (latest, *mode_parameters),
                     ).fetchone()
                 return int(row[0])
             finally:
@@ -1650,25 +1909,38 @@ class LearningStore:
         self,
         *,
         include_silver: bool = False,
+        run_mode: str | None = PRODUCTION_RUN_MODE,
     ) -> dict[str, list[dict[str, Any]]]:
         """Return GOLD reviews and explicitly requested SILVER proposals.
 
         PSEUDO and REJECTED labels are intentionally absent from this API.
         Feature snapshots are decoded but never reconstructed from model
         inputs or source identifiers.
+
+        Scoped to production runs by default. Developer runs stage and answer
+        reviews through the identical code path - that is what makes them a
+        real rehearsal - so the only thing separating a throwaway experiment
+        from evidence the champion model is trained on is this filter. Pass
+        ``run_mode=None`` to train on every mode, deliberately.
         """
+        mode_clause, mode_parameters = _run_mode_predicate(run_mode)
+        review_mode_sql = f" AND r.{mode_clause}" if mode_clause else ""
+        prediction_mode_sql = f" AND r.{mode_clause}" if mode_clause else ""
         with self._lock:
             connection = self._connect()
             try:
                 gold_rows = connection.execute(
-                    """
+                    f"""
                     SELECT h.*, p.offer_description
                     FROM human_reviews h
                     JOIN predictions p ON p.prediction_id = h.prediction_id
+                    JOIN pipeline_runs r ON r.run_id = h.run_id
                     WHERE h.answered_at IS NOT NULL
                       AND h.label_quality = 'GOLD'
+                      {review_mode_sql}
                     ORDER BY h.answered_at, h.review_id
-                    """
+                    """,
+                    tuple(mode_parameters),
                 ).fetchall()
                 gold: list[dict[str, Any]] = []
                 for row in gold_rows:
@@ -1701,7 +1973,7 @@ class LearningStore:
                 silver: list[dict[str, Any]] = []
                 if include_silver:
                     silver_rows = connection.execute(
-                        """
+                        f"""
                         SELECT a.*, p.run_id, p.offer_id,
                                p.offer_description, p.candidate_id,
                                p.candidate_description,
@@ -1709,11 +1981,14 @@ class LearningStore:
                         FROM automated_labels a
                         JOIN predictions p
                           ON p.prediction_id = a.prediction_id
+                        JOIN pipeline_runs r ON r.run_id = p.run_id
                         WHERE a.label_quality = 'SILVER'
                           AND a.eligibility_status =
                             'POLICY_QUALIFIED_REVIEW_REQUIRED_BEFORE_TRAINING'
+                          {prediction_mode_sql}
                         ORDER BY a.created_at, a.label_id
-                        """
+                        """,
+                        tuple(mode_parameters),
                     ).fetchall()
                     for row in silver_rows:
                         record = dict(row)

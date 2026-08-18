@@ -6,6 +6,38 @@ from typing import Any
 import streamlit as st
 
 from dashboard.components.formatters import format_enum_label
+from sku_mapping.learning.store import (
+    DEVELOPER_RUN_MODE,
+    PRODUCTION_RUN_MODE,
+)
+
+#: Set by the developer-mode toggle on the Upload page. Streamlit session
+#: state is app-wide, so every page reads the same answer and a developer
+#: sees their own runs rather than an empty list.
+DEVELOPER_MODE_SESSION_KEY = "developer_mode"
+
+
+def active_run_mode() -> str:
+    """Return the run mode the operator is currently working in."""
+    if st.session_state.get(DEVELOPER_MODE_SESSION_KEY, False):
+        return DEVELOPER_RUN_MODE
+    return PRODUCTION_RUN_MODE
+
+
+def render_developer_mode_banner() -> None:
+    """Make a developer session unmistakable.
+
+    Developer runs execute the entire pipeline, review staging included, so
+    nothing on screen would otherwise distinguish one from the week's real
+    output. The banner is the distinction.
+    """
+    if active_run_mode() == DEVELOPER_RUN_MODE:
+        st.warning(
+            "**Developer mode.** Runs execute the full pipeline but write to "
+            "the developer output tree, stay out of the business views, and "
+            "are excluded from training data by default.",
+            icon="🛠️",
+        )
 
 
 def safe_page_link(page: str, label: str, icon: str) -> None:
@@ -25,7 +57,10 @@ def run_label(run: dict[str, Any]) -> str:
     """Return a compact label without exposing filesystem paths."""
     mode = format_enum_label(run.get("deployment_mode"))
     status = format_enum_label(run.get("status"))
-    return f"{run['run_id']} · {mode} · {status}"
+    label = f"{run['run_id']} · {mode} · {status}"
+    if run.get("run_mode") == DEVELOPER_RUN_MODE:
+        label = f"🛠️ {label}"
+    return label
 
 
 def select_run(

@@ -8,7 +8,10 @@ from pathlib import Path
 import pandas as pd
 
 from sku_mapping.learning.models import HumanReviewAnswer
-from sku_mapping.learning.store import LearningStore
+from sku_mapping.learning.store import (
+    PRODUCTION_RUN_MODE,
+    LearningStore,
+)
 
 
 class ReviewAnswerError(ValueError):
@@ -63,8 +66,12 @@ class DashboardReviewService:
         self._master_options = options
         return dict(options)
 
-    def runs_with_review_sessions(self) -> list[dict[str, object]]:
-        runs = self.store.list_pipeline_runs(completed_only=True)
+    def runs_with_review_sessions(
+        self, *, run_mode: str | None = PRODUCTION_RUN_MODE
+    ) -> list[dict[str, object]]:
+        runs = self.store.list_pipeline_runs(
+            completed_only=True, run_mode=run_mode
+        )
         available = []
         for run in runs:
             run_id = str(run["run_id"])

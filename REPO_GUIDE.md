@@ -1,7 +1,7 @@
 # PromoStrater — Developer Handover Guide
 
 > **Audience:** a developer who knows software engineering but nothing about this project.
-> **Verified against branch `stage1-ml-only-routing`** (the current working branch — note that `main` is several architectural generations behind; see §14).
+> **Verified against `main`**, which now contains the `stage1-ml-only-routing` work (merged in PR #1). Older clones and any branch predating that merge still carry the removed embedding architecture; see §15.
 
 ---
 
@@ -15,7 +15,7 @@ Supermarkets publish promotional flyers. A data vendor ("ClickFlyer") scrapes th
 | **Competitor mapping** | "Which *rival* products in this dump compete with our catalogue item?" | Everything not Al Kabeer |
 
 **Input:** one ClickFlyer CSV/XLSX (the shipped sample is ~234k rows).
-**Output:** a SKU mapping table, a competitor relationship table, and an audit table — written to `outputs/dashboard_runs/<run_id>/` and recorded in SQLite.
+**Output:** a SKU mapping table, a competitor relationship table, and an audit table — written to `outputs/dashboard_runs/<run_mode>/<run_id>/` and recorded in SQLite. `<run_mode>` is `production` or `developer`; see §12.
 
 **Example.** The flyer row `Al Kabeer Chicken Samosas 240g` must be recognised as catalogue item `CKSA` ("12 CHICKEN SAMOSAS", 240g). Separately, the rival row `Al Islami Chicken Samosa 2x240gm` must be attached to `CKSA` as a competitor. Neither relationship is given in the source data; both are inferred.
 
@@ -93,6 +93,7 @@ Both populations ask the same catalogue the same question with the same machiner
 | `src/sku_mapping/competitors/` | Discovery, policy, adjudicator, decisions, re-ranker. | The competitor half of the product. |
 | `src/sku_mapping/llm_review/` | Provider boundary, Gemini, parser, cache. | Second-stage reviewer. Never a matcher. |
 | `src/sku_mapping/learning/` | SQLite store, migrations, observers, review selection. | Durable record of runs, predictions, decisions, human answers. |
+| `src/sku_mapping/incremental/` | Cumulative offer state and delta planning. | Lets a weekly load infer only what is new. See §12. |
 | `src/sku_mapping/retraining/` | Snapshots, challenger training, comparison, activation. | Offline champion/challenger. Never runs during an upload. |
 | `src/sku_mapping/shadow/` | Observational scoring pipeline. | Scores without affecting production rows. |
 | `dashboard/` | Streamlit UI + application services. | The only user interface. |
@@ -121,6 +122,7 @@ Both populations ask the same catalogue the same question with the same machiner
 | `src/sku_mapping/llm_review/gemini.py` | Gemini HTTP provider. | Prompt→text only; no policy. |
 | `src/sku_mapping/learning/store.py` | All SQLite access. | Every read/write to the database. |
 | `src/sku_mapping/learning/migrations.py` | Schema versions. | Any column change starts here. |
+| `src/sku_mapping/incremental/state.py` | Delta planning + cumulative frames. | Decides what a weekly load actually reprocesses. |
 | `dashboard/services/processing_service.py` | Runs a job: validate → inference → exports → persist. | The bridge from UI to engine. |
 | `config/default.yaml` | Typed configuration. | Toggles for Gemini, competitors, thresholds. |
 
@@ -130,17 +132,18 @@ Both populations ask the same catalogue the same question with the same machiner
 
 | # | Stage | Where | What it does |
 |---|---|---|---|
-| 1 | Upload & validate | `dashboard/services/upload_service.py` | Checks extension/size, hashes the bytes, refuses an exact duplicate of a previous run. |
+| 1 | Upload & validate | `dashboard/services/upload_service.py` | Checks extension/size, hashes the bytes, refuses an exact duplicate of a previous run **in the same run mode**. Developer mode never refuses a repeat. |
 | 2 | Job created | `dashboard/services/job_manager.py` | Writes a `processing_jobs` row and starts a daemon worker thread. State lives in SQLite so a refresh or second tab shows the same run. |
 | 3 | Preprocess | `data/preprocessing.py` | Normalises text, parses pack measures, derives `category` and `product_family`, sets `is_own` by brand. |
 | 4 | Offer identity | `data/offer_identity.py` | Assigns a stable `offer_group_id` (the vendor `offerid`, or a deterministic fingerprint). Rows collapse to one per identity for inference. |
+| 4b | Delta planning (production only) | `incremental/state.py` | Selects the own-brand offers that are new, content-revised, or previously unmapped against a changed Product Master. Everything else skips inference. Developer mode skips this step entirely. |
 | 5 | Entity expansion | `inference/pipeline.py` | Splits a multi-product offer ("Nuggets + Samosa") into separate entities so each can map to its own SKU. |
 | 6 | Candidates | `matching/candidate_generator.py` | Fuzzy shortlist of plausible Master SKUs per offer. |
 | 7 | Features | `features/feature_generator.py` + rank/discriminative builders | Builds the 41-column numeric frame for every (offer, candidate) pair. |
 | 8 | Score | `ml/ranked_predictor.py` | The registered LightGBM package scores each pair. |
 | 9 | Route | `matching/routing.py` | Applies the active threshold; sends the residue to Gemini or to the human queue. |
 | 10 | Competitor relationships | `competitors/discovery.py` (via `exports/business_outputs.py`) | Establishes which rival offers compete with which Master SKU. See the note below. |
-| 11 | Export | `exports/business_outputs.py`, `exports/run_outputs.py` | Writes the SKU mapping, competitor aggregate, and long-form audit. |
+| 11 | Export | `exports/business_outputs.py`, `exports/run_outputs.py` | Writes the SKU mapping, competitor aggregate, and long-form audit — always over the **cumulative** offer set, never just this file's delta. See §12. |
 | 12 | Persist | `learning/observer.py` → `learning/store.py` | Records the run, predictions, and decisions. Five review questions are selected if eligible. |
 
 **How the two populations relate.** Preprocessing sets `is_own` once (step 3), and that flag is the only thing that separates them. Steps 6–9 — candidates, features, model, routing — are the shared engine, and the global LLM toggle governs both. Competitor results are grouped back by Master SKU at export time, because a competitor answer is *reported* per SKU even though it is *decided* per offer.
@@ -313,7 +316,7 @@ Every competitor failure mode converges on REJECTED. That is deliberate: a misse
 
 | Table | Holds |
 |---|---|
-| `pipeline_runs` | One row per upload run. |
+| `pipeline_runs` | One row per upload run. Carries `run_mode` (`production` / `developer`). |
 | `processing_jobs` | Worker job state — what the dashboard polls for live status. |
 | `predictions` | Candidate-level observations (scores, decisions) per run. |
 | `offer_decisions` | The final per-offer outcome. |
@@ -321,9 +324,12 @@ Every competitor failure mode converges on REJECTED. That is deliberate: a misse
 | `review_sessions`, `human_reviews` | The five-question review flow and its answers. |
 | `automated_labels` | Machine-generated labels with provenance. |
 | `model_versions`, `training_datasets` | Registered model and dataset lineage. |
+| `offer_ledger` | One row per offer ever processed: content hash, master hash, mapped flag. Drives incremental loading. |
 | `schema_migrations` | Applied schema version. |
 
-**Migrations** live in `learning/migrations.py` and run automatically on connect. Adding or changing a column means adding a migration — never editing the table definition in place.
+**Migrations** live in `learning/migrations.py` and run automatically on connect. Adding or changing a column means adding a migration — never editing the table definition in place. The current version is **10** (`run_mode` + `offer_ledger`).
+
+`offer_ledger` deliberately has **no foreign key** to `pipeline_runs`. It is cumulative state that must outlive any individual run record: a cascade from a deleted run would silently destroy the incremental history and send the next weekly load back to a full reprocess.
 
 Readers and writers are deliberately separated: bulk inserts hold a write lock, while job-status reads take a lock-free path (WAL gives them a consistent snapshot). A shared lock previously froze the dashboard's live panel for whole stages.
 
@@ -338,7 +344,7 @@ dashboard/services/*   (validate, orchestrate, persist)
         ▼
 src/sku_mapping/inference/pipeline.py
         ▼
-SQLite + outputs/dashboard_runs/<run_id>/
+SQLite + outputs/dashboard_runs/<run_mode>/<run_id>/
         ▼
 Results pages read back from the store
 ```
@@ -347,7 +353,7 @@ Pages hold no business logic; domain modules never import Streamlit.
 
 | Page | Purpose |
 |---|---|
-| `1_Upload_and_Process.py` | Upload, start a run, live progress. |
+| `1_Upload_and_Process.py` | Upload, start a run, live progress. Hosts the **Developer mode** toggle. |
 | `2_Human_Validation.py` | The five-question review flow. |
 | `3_Results_and_Downloads.py` | Run outcome and file downloads. |
 | `4_Models_and_Learning.py` | Registered model info and learning-store stats. |
@@ -359,7 +365,7 @@ Pages hold no business logic; domain modules never import Streamlit.
 | `processing_service.py` | Runs a job end to end. **The bridge from UI to engine.** |
 | `job_manager.py` | Worker threads, job lifecycle, orphan recovery. |
 | `pipeline_status.py` | One status snapshot both the page and sidebar read, so they can't disagree. |
-| `upload_service.py` | Validation, hashing, duplicate prevention. |
+| `upload_service.py` | Validation, hashing, duplicate prevention (scoped per run mode). |
 | `run_service.py` / `review_service.py` | Run history; review answers. |
 | `registry_service.py` / `model_insights_service.py` | Model listing and plain-language model info. |
 
@@ -407,11 +413,125 @@ What the toggle changes: **the threshold and the review destination. Nothing els
 
 That equivalence is asserted in `tests/unit/test_toggle_production_wiring.py`, and it is the reason the toggle is safe to flip on a live deployment.
 
+Run mode is **not** configured here. It is a per-run choice made on the Upload page and recorded on the run itself (§12), because two runs started minutes apart may legitimately want different answers.
+
 Never put credentials in this file. The Gemini key comes from the environment.
 
 ---
 
-## 12. Tests
+## 12. Run modes and incremental loading
+
+Two features, one idea: a run declares **which body of state it belongs to**,
+and that declaration decides what it reads, what it writes, and who sees it.
+
+### The toggle
+
+`Developer mode` on the Upload page. Both modes execute the **identical**
+pipeline — candidate generation, scoring, Gemini review, competitor
+discovery, review staging. Nothing is stubbed or skipped in developer mode.
+What differs is state.
+
+| | Production | Developer |
+|---|---|---|
+| Outputs | `outputs/dashboard_runs/production/` | `outputs/dashboard_runs/developer/` |
+| Offer ledger | reads it, then advances it | never touched |
+| Same file uploaded twice | refused as a duplicate | always runs, always in full |
+| Run pickers (`2_Human_Validation`, `3_Results_and_Downloads`) | shown | shown — they follow the active toggle, so a developer can see their own results |
+| `5_Al_Kabeer_SKUs` (the business view) | shown | **never** shown — pinned to production |
+| Training snapshot + retrain gate | included | excluded by default |
+
+Runs were **always** isolated by `run_id`, so nothing ever overwrote anything
+and the directory split is not what makes developer mode safe. Ledger
+participation is. The folders exist so a person browsing the filesystem
+cannot mistake an experiment for the week's business output.
+
+**Developer runs still stage human reviews**, deliberately — that is what
+makes a developer run a real rehearsal rather than a partial one. What keeps
+them out of training is the *selection*, not a blocked code path:
+`governed_training_labels()` and `count_new_gold_labels_since_last_model()`
+both default to `run_mode="production"`. Pass `run_mode=None` to include
+every mode, deliberately.
+
+`store.list_pipeline_runs()` defaults to production too, so a caller that
+never considered run modes returns an empty list rather than silently
+surfacing an experiment. The one deliberate exception is
+`pipeline_status.py`, which passes `run_mode=None`: the sidebar must report
+the run that is actually happening, whichever mode owns it.
+
+### Incremental loading
+
+A production run infers an own-brand offer only if it is:
+
+1. **new** — never seen before;
+2. **revised** — its content hash changed under an unchanged `offerid`, which
+   is what a corrected price looks like; or
+3. **re-mappable** — it was seen, never matched, and `Product_Master.xlsx`
+   has changed since.
+
+Everything else skips inference entirely.
+
+**The watermark is offer identity, never a date.** ClickFlyer dumps carry
+backdated rows and corrections, so a "process everything after date X" filter
+drops exactly the rows a correction was meant to deliver — silently and
+permanently. The latest `Offer End Date` *is* recorded and reported as
+`data_through_offer_end_date`, but only so an operator can be told how
+current the data is. Nothing selects work by it.
+`test_backdated_rows_are_not_dropped` fails if anyone reintroduces that.
+
+**Inference is incremental; outputs are cumulative.** This is the part that
+is easy to get wrong. Competitor discovery answers "which rivals compete with
+this Master SKU" — a question about *every offer ever seen*, not about this
+week's file. Exporting a delta would produce a competitor list that looks
+complete and is not. So each run reassembles the full picture from stored
+state plus its own delta, and the export layer never learns that incremental
+loading exists.
+
+`test_two_incremental_loads_equal_one_full_load` splits a dump in half and
+asserts the two-run result is frame-for-frame identical to one full run.
+**That is the property to protect.** It is what would break silently if
+someone later tries to make the exports incremental too.
+
+### Where the state lives
+
+`outputs/dashboard_runs/_incremental/` — three frames, alongside the existing
+`_pipeline` and `_shadow` trees:
+
+| File | Holds |
+|---|---|
+| `canonical_offers.pkl` | Variant-level pool of every offer ever seen (own + competitor). Feeds competitor discovery. |
+| `own_offer_rows.pkl` | One canonical row per offer identity. |
+| `decisions.pkl` | Cumulative per-offer decisions. |
+
+Derived from `dashboard.output_directory` rather than configured separately,
+so anything that redirects outputs — a test, a second checkout — redirects
+cumulative state with it instead of sharing one global history. There is no
+YAML key for it, by design.
+
+**Pickle, not Parquet.** Prepared offers carry non-scalar derived features
+(`offer_measures_detailed` holds nested measure objects) that Parquet cannot
+encode without a lossy type round-trip — and that round-trip would alter the
+very values the content hashes are computed over, so every unchanged offer
+would read as revised and incremental loading would quietly degrade into full
+reprocessing. These are local, single-writer files, never an interchange
+format.
+
+**To force a full reprocess:** `store.reset_offer_ledger()` and
+`IncrementalStateStore(...).clear()`. Both must be done together — the ledger
+decides what is skipped, the frames supply what is carried forward.
+
+### What this does and does not save
+
+Saved: the expensive per-offer work — candidate generation, feature building,
+LightGBM scoring, Gemini calls — for every offer already current.
+
+**Not saved:** competitor discovery, which still runs across the full history
+every week. That is the price of the export staying complete, and it is the
+dominant cost on a large ledger. Also not saved: the first production run,
+which processes everything and builds the ledger from scratch.
+
+---
+
+## 13. Tests
 
 63 unit files, 16 integration files. Run everything with `pytest` from the repo root.
 
@@ -421,6 +541,7 @@ Never put credentials in this file. The Gemini key comes from the environment.
 | Policy units | Routing modes, toggle wiring, agreement policy, safety thresholds. |
 | Competitor units | Discovery gates, decision policy, adjudication, business outputs. |
 | Store units | Schema, migrations, reviews, persistence visibility. |
+| Run modes + incremental | Mode isolation, ledger behaviour, and the incremental/full equivalence property. |
 | Dashboard units | Services, progress, formatters, upload validation. |
 | Integration | Whole-pipeline runs, phase boundaries, isolation guarantees, retraining, cancellation. |
 
@@ -434,13 +555,15 @@ Never put credentials in this file. The Gemini key comes from the environment.
 | Competitors | `tests/unit/test_business_outputs.py`, `tests/unit/test_business_safety_adversarial.py` |
 | LLM review | `tests/unit/test_llm_reviewer.py`, `tests/integration/test_llm_review_phase_boundaries.py` |
 | Store / migrations | `tests/unit/test_learning_store_schema.py`, `tests/integration/test_learning_store_observation.py` |
+| Run modes, the ledger, incremental loading | `tests/integration/test_incremental_and_run_modes.py` |
+| Anything touching what gets reprocessed | `tests/integration/test_incremental_and_run_modes.py::test_two_incremental_loads_equal_one_full_load` — **the equivalence property**; if this fails, incremental loading is shipping a different answer than a full run |
 | Dashboard | `tests/unit/test_dashboard_services.py`, `tests/integration/test_dashboard_processing_service.py` |
 | Model loading | `tests/unit/test_model_package.py`, `tests/unit/test_controlled_model_registry.py` |
 | Anything in the orchestrator | `tests/integration/test_unified_inference_pipeline.py` |
 
 ---
 
-## 13. Where do I go if…
+## 14. Where do I go if…
 
 | I need to change… | Start here |
 |---|---|
@@ -457,6 +580,9 @@ Never put credentials in this file. The Gemini key comes from the environment.
 | Competitor ranking with the model | `src/sku_mapping/competitors/reranker.py` |
 | Anything touching the database | `src/sku_mapping/learning/store.py` |
 | A schema/column change | `src/sku_mapping/learning/migrations.py` (add a migration) |
+| What a weekly load reprocesses | `src/sku_mapping/incremental/state.py` |
+| Which runs a page or service can see | the `run_mode` argument on `store.list_pipeline_runs()` — production by default |
+| Forcing a full reprocess | `store.reset_offer_ledger()` **and** `IncrementalStateStore(...).clear()` — both, or the two disagree |
 | A page, control, or progress display | `dashboard/pages/`, `dashboard/components/` |
 | How a run is orchestrated | `dashboard/services/processing_service.py` |
 | Output columns or file layout | `src/sku_mapping/exports/business_outputs.py` |
@@ -466,9 +592,9 @@ Never put credentials in this file. The Gemini key comes from the environment.
 
 ---
 
-## 14. Current limitations
+## 15. Current limitations
 
-- **`main` is far behind.** The current branch is `stage1-ml-only-routing`. `main` still contains the removed embedding architecture and the older two-scorer agreement policy. Don't read `main` to learn the system.
+- **Older clones are far behind.** `main` now contains the `stage1-ml-only-routing` work, but any clone or branch predating that merge still carries the removed embedding architecture and the older two-scorer agreement policy. Check that you have PR #1 before reading the code to learn the system.
 - **Thresholds are provisional and unvalidated.** `0.95` / `0.85` are operational choices, never measured against a human-labelled set. The competitor margin/gap thresholds come from an 8,000-row slice with **no human competitor labels at all**.
 - **Competitor precision and recall have never been independently validated.** There is no competitor ground truth at all. `review_staging_per_target` exists to start collecting it and defaults to `0`.
 - **The competitor migration is mid-flight.** The shared engine is the agreed target and is implemented in `matching/shared_matcher.py`, but nothing imports it yet, so competitors still run the rule-gate + fuzzy path in `discovery.py`. Both are real; neither is dead. Treat §7's status table as the source of truth.
@@ -477,11 +603,15 @@ Never put credentials in this file. The Gemini key comes from the environment.
 - **`agreement/` overlaps `routing.py`**, leaving two places that look like threshold authorities. Only `routing.py` is.
 - **Gemini connectivity is unverified in this repository.** The provider is implemented, but `llm_review.provider` is `ollama` and `llm_review.enabled` is `false`, so no LLM call is made by default and no test exercises a real external API.
 - **Pack size is a hard conflict at ±10%**, so a 500g rival pack is never a competitor to a 240g SKU. That's a deliberate business rule, not a bug — but it's the single largest source of competitor rejections after family conflict.
+- **Incremental loading does not shorten competitor discovery.** Only per-offer inference is skipped. Competitor discovery is cross-sectional and still runs over the entire ledger every week, so the weekly run does not get faster indefinitely — it converges on the cost of discovery over the full history.
+- **The offer content hash is 64-bit** (`hash_pandas_object`). Across a million offers the chance of any collision is roughly three in a hundred million, and the only consequence is that one revised offer is not re-inferred. Cheap enough to accept; worth knowing it is not cryptographic.
+- **Cumulative state is pickle.** It is local single-writer state under the gitignored `outputs/` tree, but it is therefore tied to the pandas version that wrote it. A major pandas upgrade may require clearing and rebuilding it (see §12).
+- **`mapped` in the ledger is read from decisions, not from the export.** If a future change moves where the final SKU is recorded, `_ledger_records` in `processing_service.py` must move with it — otherwise offers get marked mapped when they are not and are never reconsidered.
 - **SQLite, single host.** No multi-user authorisation; the dashboard ships no authentication.
 
 ---
 
-## 15. Ten-minute handover talking points
+## 16. Ten-minute handover talking points
 
 1. **What it does** — maps flyer offers to Al Kabeer's catalogue, and finds which rival offers compete with each catalogue item.
 2. **One engine, two claims** — the dump is split by `is_own`, and both populations use the same candidate generator, the same 41 features and the same LightGBM. What differs is the business relationship being established: own-SKU asserts *identity* ("this offer **is** SKU X"), competitor asserts *rivalry* ("this rival offer **competes with** SKU X").
@@ -495,4 +625,7 @@ Never put credentials in this file. The Gemini key comes from the environment.
 10. **Every competitor rejection has a reason code** — the user-facing aggregate is a projection of the long-form audit, so the two can't disagree.
 11. **The database is the source of truth** — job state lives in SQLite, not session state, which is why a refresh doesn't lose a run.
 12. **Inference never trains** — retraining is a separate, operator-triggered champion/challenger workflow.
-13. **When something breaks** — read `inference/pipeline.py` for the orchestration, check `processing_jobs` for the run's real state, and remember that `routing.py` is the only place a threshold lives.
+13. **Two run modes, one pipeline** — developer runs execute everything production does, including review staging; they differ only in which state they touch and who can see them.
+14. **Weekly loads are incremental, exports are cumulative** — only new or revised offers are inferred, but competitor discovery is a question about every offer ever seen, so the outputs are always rebuilt over the full history. The equivalence test is what holds that line.
+15. **Identity decides the work, never a date** — dumps arrive backdated and corrected, so a date watermark drops exactly the rows a correction was meant to deliver.
+16. **When something breaks** — read `inference/pipeline.py` for the orchestration, check `processing_jobs` for the run's real state, and remember that `routing.py` is the only place a threshold lives.

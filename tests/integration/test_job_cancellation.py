@@ -34,7 +34,7 @@ from dashboard.services.processing_service import (
 from sku_mapping.config import load_config
 from sku_mapping.constants import MLDeploymentMode
 from sku_mapping.learning.migrations import CURRENT_SCHEMA_VERSION
-from sku_mapping.learning.store import LearningStore
+from sku_mapping.learning.store import PRODUCTION_RUN_MODE, LearningStore
 
 from tests.registered_models import registered_model_id  # noqa: E402
 
@@ -154,8 +154,12 @@ def test_cancellation_preserves_partial_logs_and_outputs(
 
     run_id = caught.value.run_id
     assert run_id is not None
-    report = config.dashboard.output_directory / run_id / (
-        "cancellation_report.json"
+    # Cancellation artifacts follow the run into its mode's output tree.
+    report = (
+        config.dashboard.output_directory
+        / PRODUCTION_RUN_MODE
+        / run_id
+        / "cancellation_report.json"
     )
     assert report.is_file()
     import json
